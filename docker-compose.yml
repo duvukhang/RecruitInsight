@@ -1,0 +1,141 @@
+name: ${COMPOSE_PROJECT_NAME:-recruitment}
+x-app: &app
+  image: recruitment-app:dev
+  build:
+    context: .
+    dockerfile: infrastructure/docker/backend.Dockerfile
+  environment: &env
+    MONGO_HOST: mongodb
+    MONGO_USER: ${MONGO_APP_USER:-recruitment}
+    MONGO_PASSWORD: ${MONGO_APP_PASSWORD:?Set MONGO_APP_PASSWORD in .env}
+    MONGO_DATABASE: recruitment_bigdata
+    JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+    ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+    SPARK_MASTER: spark://spark-master:7077
+    DATA_ROOT: /data
+  volumes:
+    - uploads:/data/uploads
+    - artifacts:/data/artifacts
+    - events:/data/events
+    - checkpoints:/data/checkpoints
+    - backups:/data/backups
+  restart: unless-stopped
+  networks: [internal]
+services:
+  mongodb:
+    image: mongo:8.0.9
+    ports: ["127.0.0.1:27018:27017"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+    volumes: [mongo-data:/data/db]
+    networks: [internal]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, 'mongosh --quiet --username "$$MONGO_INITDB_ROOT_USERNAME" --password "$$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "db.adminCommand({ping:1}).ok"']
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  mongo-init:
+    <<: *app
+    restart: "no"
+    environment:
+      <<: *env
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-root}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    command: [python, -m, recruitment.infrastructure.init_db]
+    depends_on:
+      mongodb: {condition: service_healthy}
+  backend:
+    <<: *app
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  spark-master:
+    <<: *app
+    command: [spark-class, org.apache.spark.deploy.master.Master, --host, spark-master]
+    ports: ["127.0.0.1:8081:8080"]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/json/]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  spark-worker:
+    <<: *app
+    command: [spark-class, org.apache.spark.deploy.worker.Worker, --cores, "1", --memory, 2g, --work-dir, /tmp/spark-work, spark://spark-master:7077]
+    depends_on:
+      spark-master: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8081/json/]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  etl-worker:
+    <<: *app
+    hostname: etl-worker
+    environment:
+      <<: *env
+      WORKER_KIND: ETL
+      SPARK_DRIVER_HOST: etl-worker
+    command: [python, -m, workers.runner]
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+      spark-master: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, workers.health]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  training-worker:
+    <<: *app
+    hostname: training-worker
+    environment:
+      <<: *env
+      WORKER_KIND: TRAINING
+      SPARK_DRIVER_HOST: training-worker
+    command: [python, -m, workers.runner]
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+      spark-master: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, workers.health]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  frontend:
+    build:
+      context: frontend
+    ports: ["127.0.0.1:${FRONTEND_PORT:-8080}:8080"]
+    depends_on:
+      backend: {condition: service_healthy}
+    networks: [internal]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:8080/health]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  test-backend:
+    <<: *app
+    restart: "no"
+    profiles: [test]
+    command: [python, -m, pytest, -q, tests]
+    environment:
+      <<: *env
+      MONGO_DATABASE: recruitment_test
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+networks:
+  internal: {}
+volumes:
+  mongo-data:
+  uploads:
+  artifacts:
+  events:
+  checkpoints:
+  backups:

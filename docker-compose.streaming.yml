@@ -1,0 +1,64 @@
+services:
+  kafka-volume-init:
+    image: apache/kafka:4.2.0
+    profiles: [streaming]
+    user: "0:0"
+    entrypoint: [chown, "1000:1000", /kafka-data]
+    volumes: [kafka-data:/kafka-data]
+    networks: [internal]
+    restart: "no"
+  kafka:
+    image: apache/kafka:4.2.0
+    profiles: [streaming]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    volumes: [kafka-data:/tmp/kraft-combined-logs]
+    networks: [internal]
+    restart: unless-stopped
+    depends_on:
+      kafka-volume-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, /opt/kafka/bin/kafka-topics.sh, --bootstrap-server, kafka:9092, --list]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+  streaming-worker:
+    image: recruitment-app:dev
+    profiles: [streaming]
+    hostname: streaming-worker
+    environment:
+      MONGO_HOST: mongodb
+      MONGO_USER: ${MONGO_APP_USER:-recruitment}
+      MONGO_PASSWORD: ${MONGO_APP_PASSWORD}
+      MONGO_DATABASE: recruitment_bigdata
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_DRIVER_HOST: streaming-worker
+      SPARK_MAX_CORES: 1
+      SPARK_PACKAGES: org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7
+      WORKER_KIND: STREAMING
+      DATA_ROOT: /data
+    command: [python, -m, bigdata.streaming]
+    volumes: [uploads:/data/uploads, artifacts:/data/artifacts, events:/data/events, checkpoints:/data/checkpoints]
+    networks: [internal]
+    restart: unless-stopped
+    depends_on:
+      kafka: {condition: service_healthy}
+      mongo-init: {condition: service_completed_successfully}
+      spark-master: {condition: service_healthy}
+volumes:
+  kafka-data:

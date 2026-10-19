@@ -1,0 +1,33 @@
+services:
+  mlflow-volume-init:
+    image: recruitment-app:dev
+    profiles: [mlops]
+    user: "0:0"
+    entrypoint: [chown, "10001:10001", /mlflow]
+    volumes: [mlflow-data:/mlflow]
+    networks: [internal]
+    restart: "no"
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.22.0
+    profiles: [mlops]
+    user: "10001:10001"
+    working_dir: /mlflow
+    command: [mlflow, server, --backend-store-uri, "sqlite:////mlflow/mlflow.db", --serve-artifacts, --artifacts-destination, /mlflow/artifacts, --host, 0.0.0.0, --port, "5000", --workers, "1"]
+    volumes: [mlflow-data:/mlflow]
+    ports: ["127.0.0.1:5000:5000"]
+    networks: [internal]
+    restart: unless-stopped
+    depends_on:
+      mlflow-volume-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  training-worker:
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    depends_on:
+      mlflow: {condition: service_healthy}
+volumes:
+  mlflow-data:

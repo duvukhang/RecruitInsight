@@ -1,0 +1,15 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+pydantic-settings==2.9.1
+pymongo==4.13.0
+python-multipart==0.0.20
+PyJWT==2.10.1
+argon2-cffi==23.1.0
+httpx==0.28.1
+pytest==8.3.5
+scikit-learn==1.6.1
+joblib==1.5.0
+numpy==2.2.5
+pyspark==3.5.7
+xgboost-cpu==2.1.4
+matplotlib==3.10.3

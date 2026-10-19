@@ -1,0 +1,3 @@
+# Install from the project root: python -m pip install -r requirements.txt
+# Reuse the exact Python dependency versions used by the Docker image.
+-r backend/requirements.lock

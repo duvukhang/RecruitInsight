@@ -1,0 +1,9 @@
+.git
+.env
+.venv
+**/node_modules
+**/__pycache__
+artifacts
+data
+.docker-local
+frontend/dist
