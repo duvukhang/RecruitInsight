@@ -3,7 +3,7 @@ import json
 import os
 import pytest
 from bigdata.spark_session import spark_session
-from bigdata.etl import transform, aggregate
+from bigdata.etl import transform, aggregate, classified_output
 from recruitment.infrastructure.config import settings
 from recruitment.infrastructure.init_db import migrate
 from recruitment.adapters.mongo import database
@@ -28,6 +28,28 @@ def test_distributed_transform_counts():
         assert stats['total_jobs']==2
         assert stats['salary_sample_size']==1
         assert stats['median_salary_vnd']==15000000
+        assert clean.filter('experience_years is null').count()==2
+        grouped=aggregate(clean)['industries'][0]
+        assert grouped['median_salary_vnd']==15000000
+        assert grouped['warnings']==['SMALL_SALARY_SAMPLE']
+    finally:
+        spark.stop();path.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(os.getenv('RUN_SPARK_TESTS') != '1', reason='Dedicated Spark integration run')
+def test_benchmark_uses_production_outcomes_for_invalid_and_external_duplicates():
+    path=settings().data_root/'uploads'/'test-benchmark-outcomes.raw.jsonl'
+    values=[{'job_title':'','company_name':'A','source_job_id':'same'},
+            {'job_title':'Engineer','company_name':'A','source_job_id':'same'},
+            {'job_title':'Engineer','company_name':'A','source_job_id':'same'},
+            {'job_title':'Engineer','company_name':'B','source_job_id':'other','_global_duplicate_ref':'previous'}]
+    path.write_text('\n'.join(json.dumps({'record_number':i,'raw_record_ref':str(i),'payload_json':json.dumps(v)}) for i,v in enumerate(values)),encoding='utf-8')
+    spark=spark_session('benchmark-outcome-regression')
+    try:
+        _,clean,duplicates,invalid=transform(spark,str(path),'TEST')
+        classified=classified_output(clean,duplicates,invalid)
+        assert {r['outcome']:r['count'] for r in classified.groupBy('outcome').count().collect()}=={'clean':1,'duplicate':2,'invalid':1}
+        assert duplicates.filter("source_job_key = 'TEST:same'").first()['canonical_raw_ref']=='1'
     finally:
         spark.stop();path.unlink(missing_ok=True)
 

@@ -19,11 +19,12 @@ def normalize(payload_json, raw_ref, record_number, source, normalization=None):
     if raw.get('job_title',raw.get('title')) is not None and not isinstance(raw.get('job_title',raw.get('title')),str):error=error or 'INVALID_TITLE_TYPE'
     if raw.get('company_name',raw.get('company')) is not None and not isinstance(raw.get('company_name',raw.get('company')),str):error=error or 'INVALID_COMPANY_TYPE'
     try:
-        experience = float(raw.get('experience_years', raw.get('experience_years_min', 0)) or 0)
-        if not math.isfinite(experience) or experience < 0 or experience > 60:
-            error = error or 'INVALID_EXPERIENCE';experience = 0
+        experience_raw = raw.get('experience_years', raw.get('experience_years_min'))
+        experience = None if experience_raw is None or (isinstance(experience_raw, str) and not experience_raw.strip()) else float(experience_raw)
+        if experience is not None and (isinstance(experience_raw, bool) or not math.isfinite(experience) or experience < 0 or experience > 60):
+            error = error or 'INVALID_EXPERIENCE';experience = None
     except (ValueError, TypeError):
-        error = error or 'INVALID_EXPERIENCE';experience = 0
+        error = error or 'INVALID_EXPERIENCE';experience = None
     skills = raw.get('required_skills', raw.get('skills', []))
     if isinstance(skills, str):
         skills = re.split('[,;|]', skills)

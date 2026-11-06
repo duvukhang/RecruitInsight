@@ -1,5 +1,7 @@
 # Phase 9 — Kiểm chứng hệ thống
 
+> Bằng chứng lịch sử ngày 18–19/10/2026, không phải kết quả chạy lại source nâng cấp 05/11/2026. Xem [audit và trạng thái kiểm chứng mới](research-upgrade.md).
+
 Các phép chạy dưới đây thực hiện ngày 18/10/2026; báo cáo được hoàn thiện ngày 19/10/2026. Đây là kết quả quan sát trên Docker Desktop của máy phát triển, dùng **dữ liệu DEMO tổng hợp seed 42**, không phải dữ liệu thị trường. Những báo cáo phase trước giữ nguyên bối cảnh của lần chạy lúc đó.
 
 ## Kết quả theo năm trọng tâm

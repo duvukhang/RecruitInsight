@@ -1,173 +1,74 @@
-# Phase 1 — Yêu cầu và kiến trúc
+# Bài toán nghiên cứu và kiến trúc RecruitInsight
 
-## 1. Phạm vi và use cases
+## Phát biểu bài toán
 
-Mục tiêu: phân tích tập tin tuyển dụng đã thu thập và ước lượng lương tháng VND từ thông tin công việc. Thống kê chỉ đại diện cho dataset, nguồn và giai đoạn quan sát; không suy rộng thành toàn bộ thị trường lao động.
+**Làm thế nào để xây dựng hệ thống xử lý dữ liệu tuyển dụng có khả năng phân tích đặc điểm các tin tuyển dụng và ước lượng mức lương được công bố dựa trên thông tin công việc?**
 
-| ID | Yêu cầu chức năng | Người dùng | Kết quả |
+Tin tuyển dụng bán cấu trúc có thể thiếu lương, sai kỳ hạn, lặp lại và khác cách ghi. Đồ án giải quyết chuẩn hóa, truy vết, phân tích mẫu quan sát và hồi quy lương công bố. Người dùng: người xem thống kê (VIEWER), người phân tích/dự đoán (ANALYST), người quản lý dữ liệu và mô hình (ADMIN).
+
+| Bài toán | Input | Output | Câu hỏi nghiên cứu |
 | --- | --- | --- | --- |
-| R01 | Upload CSV/JSON/JSONL, offline import | ADMIN | Dataset, ingestion run, raw records có nguồn gốc |
-| R02 | Submit, theo dõi, retry và cancel ETL | ADMIN | Job bất đồng bộ; clean/invalid/duplicate; quality report |
-| R03 | Công bố hoặc quay lại dataset version | ADMIN | Pointer nhất quán đến snapshot hoàn chỉnh |
-| R04 | Lọc dashboard và danh sách tin | VIEWER, ANALYST, ADMIN | API truy vấn dataset version xác định |
-| R05 | Huấn luyện, so sánh và active/rollback model | ADMIN | Baseline, regressors, metrics, model registry |
-| R06 | Dự đoán và xem lịch sử cá nhân | ANALYST, ADMIN | Kết quả từ artifact active, lưu MongoDB |
-| R07 | Kiểm tra trạng thái, logs và audit | ADMIN | Job progress, lỗi, request correlation |
-| R08 | Nhận sự kiện Kafka qua Spark Streaming | ADMIN | Checkpoint, idempotent sink, recovery |
-| R09 | Benchmark và xuất bằng chứng | ADMIN | Báo cáo có môi trường, số liệu đo và checksum |
+| A: Phân tích | Tin đã làm sạch, nguồn, ngày đăng và dataset version | Counts, salary coverage, mean/median/quantiles, skills, trends | Ngành/tỉnh nào xuất hiện nhiều tin? Kỹ năng nào thường được nhắc? Lương công bố khác nhau theo ngành/tỉnh/kinh nghiệm thế nào? Số tin thay đổi theo tháng ra sao? |
+| B: Hồi quy có giám sát | Title, industry, province, experience, seniority, education, employment/remote type, skills | Ước lượng midpoint lương tháng VND; model/dataset version, reference period, test errors, warnings | Các mô hình có giảm MAE so với median baseline trên cùng split không? Sai số khác nhau giữa các nhóm nào? |
+| C: Xử lý dữ liệu | Raw version bất biến, normalization config, Spark topology | Clean/invalid/duplicate, quality report, analytics snapshot, benchmark evidence | Cùng workload/output, local một luồng và cluster một/hai executor có thời gian và throughput thế nào? |
 
-Yêu cầu phi chức năng: pipeline chạy lại an toàn; API không huấn luyện hoặc chạy Spark trong request; pagination ở server; UTC cho timestamps; mọi kết quả gắn dataset/model/pipeline/code version. Secrets không commit/log. Health check phân biệt process sống và dependency sẵn sàng. Đo latency/throughput trên máy thực rồi mới đặt SLA, không cam kết số liệu chưa đo.
+Mục tiêu định lượng là tiêu chí kiểm chứng, không phải kết quả hứa trước: đối soát 100% raw thành ba outcome; không giao doanh nghiệp giữa các split; mọi mô hình local dùng cùng sample và test IDs; validity gate mặc định 0,90 và có clean; ít nhất ba lần đo sau warm-up cho từng cấu hình/quy mô. Không đặt mục tiêu R² hoặc speedup chưa có dữ liệu thực.
 
-## 2. Kiến trúc cuối cùng
+Giả thuyết H1: mô hình dùng thông tin công việc có validation MAE nhỏ hơn median baseline. H2: overhead phân tán có thể làm cluster chậm trên mẫu nhỏ; thêm executor có thể có lợi ở quy mô lớn hơn. Đây là giả thuyết cần đo; DEMO chỉ kiểm tra quy trình và không xác nhận khả năng dự báo thị trường.
 
-Backend modular monolith, theo Clean/Hexagonal Architecture. Router chỉ nhận/validate/map HTTP; application service điều phối domain rules qua ports; adapters triển khai MongoDB, Kafka, artifact serving. Domain không import FastAPI, PyMongo hay Spark. Worker ETL/training là process riêng, dùng chung kiểu dữ liệu và domain rules phù hợp, triển khai compute độc lập.
+## Luồng dữ liệu hiện có
 
 ```mermaid
 flowchart LR
-  U[Trình duyệt React] --> N[Nginx frontend]
-  N --> A[FastAPI /api/v1]
-  A --> S[Application services]
-  S --> D[Domain rules và ports]
-  S --> M[(MongoDB nghiệp vụ và job queue)]
-  E[ETL worker / Spark driver] --> M
-  T[Training worker / Spark driver] --> M
-  E --> SM[Spark master]
-  T --> SM
-  SM --> W1[Spark worker 1]
-  SM --> W2[Spark worker 2]
-  W1 --> M
-  W2 --> M
-  T --> F[MLflow profile]
-  F --> V[(SQLite metadata và artifact volume)]
-  S --> I[Model serving adapter]
-  I --> AV[(Artifact volume đã xác minh)]
-  P[Producer profile streaming] --> K[Kafka]
-  K --> SS[Spark Structured Streaming driver]
-  SS --> SM
+  S[Nguồn được phép / CSV JSON JSONL] --> I[Upload + ingestion worker]
+  I --> R[(MongoDB raw_jobs + file gốc)]
+  R --> E[Spark validation / normalization]
+  E --> B[(invalid_jobs)]
+  E --> D[Deterministic dedup]
+  D --> U[(duplicate_jobs)]
+  D --> C[(cleaned_jobs: version + attempt)]
+  C --> Q[Quality gate + đối soát]
+  Q -->|Đạt| A[Spark analytics snapshots]
+  Q -->|Không đạt| F[FAILED; giữ active pointer cũ]
+  A --> P[CAS publish dataset]
+  P --> API[FastAPI analytics]
+  API --> UI[React dashboard / analysis]
+  P --> T[Company split + preprocessing train only]
+  T --> ML[Local models / Spark numeric riêng]
+  ML --> M[(Model registry + artifact hashes)]
+  M --> V[Active model / inference API]
+  V --> H[(Prediction history)]
+  V --> UI
+  K[Kafka profile] --> SS[Structured Streaming + checkpoint / event ledger]
+  SS --> R
+  ML -. MLflow profile .-> MF[MLflow metadata / artifacts]
 ```
 
-```mermaid
-flowchart TD
-  Src[CSV / JSON / JSONL / offline / API được phép] --> In[Ingestion run]
-  In --> Raw[(raw_jobs)]
-  Raw --> Val[Spark validation và normalization]
-  Val --> Bad[(invalid_jobs)]
-  Val --> Dedup[Deterministic deduplication]
-  Dedup --> Dup[(duplicate_jobs)]
-  Dedup --> Clean[(cleaned_jobs theo version và attempt)]
-  Clean --> Quality[Data quality gate]
-  Quality -->|Không đạt| Failed[Giữ version hiện hành; lưu lỗi]
-  Quality -->|Đạt| Agg[Spark SQL aggregations]
-  Agg --> Snap[(analytics_snapshots)]
-  Snap --> Pub[CAS publish dataset pointer]
-  Pub --> API[Analytics API và frontend]
-  Clean --> Split[Train / validation / test manifest]
-  Split --> Train[Preprocessing + model training]
-  Train --> Registry[Model registry và artifact]
-  Registry --> Predict[Inference API và prediction history]
-```
+Backend modular monolith FastAPI; HTTP không chạy Spark/training đồng bộ. Workers ETL và training là Spark drivers riêng. MongoDB lưu dữ liệu bán cấu trúc, version pointers, job queue, reports và registry; artifact/file volumes giữ payload và models. React dùng API qua nginx. MongoDB dùng singleton pointer và CAS, không có transaction đa collection. Kafka và MLflow chỉ bật khi cần; SQLite của MLflow không phải database nghiệp vụ.
 
-Luồng dependency: `api → application → domain`; application phụ thuộc interfaces trong `ports`; infrastructure composition root inject adapters. Job handlers gọi application service, không gọi HTTP ngược vào backend. MongoDB là job queue giai đoạn đầu để giảm hạ tầng; Kafka dành cho sự kiện tuyển dụng, không thay thế job ownership.
+Spark thực hiện repartition, UDF normalization, window dedup, shuffle và SQL aggregation; ghi Mongo bằng foreachPartition/bulk upsert. Đây là thiết kế xử lý phân tán, không tự chứng minh quy mô Big Data thực. Docker cố định runtime và chia process/tài nguyên; nhiều containers trên một máy không phải cluster nhiều máy vật lý. Cấu hình cache/shuffle có thể ảnh hưởng phép đo, cần lưu môi trường và workload [1].
 
-## 3. Quyết định công nghệ và tương thích
+## Phạm vi và giới hạn
 
-| Thành phần | Quyết định thiết kế | Kiểm chứng và điều kiện khóa phiên bản |
-| --- | --- | --- |
-| Spark/PySpark | 3.5.7, Scala 2.12, Java 17, Python 3.11 | Tài liệu Spark xác nhận Java 17 và Python 3.8+; driver/executor phải cùng Python, Spark và Scala ABI |
-| Mongo Spark connector | `org.mongodb.spark:mongo-spark-connector_2.12:10.7.0` | MongoDB công bố hỗ trợ Spark 3.2–3.5, MongoDB ≥4.2; chạy round-trip test trước khóa build |
-| Spark Kafka connector | `org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7` | Cùng phiên bản Spark và Scala; kiểm tra checkpoint/restart ở Phase 8 |
-| MongoDB | Nhánh 8.0, PyMongo đồng bộ | Chọn patch cụ thể và digest tại Phase 2; API dùng sync endpoints/threadpool cho I/O blocking |
-| API | FastAPI + Pydantic v2 + Settings, Python 3.11 | Resolve và pin toàn bộ lock tại Phase 2, chạy startup/schema/auth smoke test |
-| Web | React + TypeScript + Vite, Node 24 build stage | Pin manifest/lock; React Router, TanStack Query, RHF/Zod, Tailwind/shadcn, ECharts, Lucide |
-| ML | Spark MLlib + scikit-learn + XGBoost | Lock riêng training/serving; kiểm tra save/load và prediction parity |
-| MLflow | Profile MLOps; SQLite backend, artifact volume | Metadata phụ trợ; MongoDB giữ business registry; một tracking server cho cấu hình đồ án |
-| Kafka | Profile streaming, single-broker KRaft cho demo | Chọn patch/image digest Phase 2; single broker không có HA |
-| Test | pytest/HTTPX, Vitest/RTL, Playwright | Khóa theo runtime; chạy integration trên services thật |
+- Dữ liệu sẵn có là DEMO seed 42, chủ yếu IT. Chưa có dataset thị trường thực được cấp phép, chưa có đánh giá ngoài phân phối hay tương lai.
+- Counts là số tin trong dữ liệu quan sát; không phải tổng nhu cầu lao động Việt Nam. Dữ liệu quảng cáo việc làm có sai lệch bao phủ/ngành/nghề, cần đối chiếu nguồn thống kê độc lập trước suy rộng [5]. Không chuyển kết quả của nghiên cứu nước ngoài thành bằng chứng đại diện cho Việt Nam.
+- Target là midpoint lương công bố chuẩn hóa; khác lương thực nhận. NET không được tự đổi GROSS; UNKNOWN basis còn trong ML là nguy cơ nhiễu nhãn. Missing salary có thể không ngẫu nhiên nên tập có nhãn có selection bias.
+- Mean/median theo ngành/tỉnh và importance của model là mô tả, không phải quan hệ nhân quả. Percentile Spark và Mongo là xấp xỉ [2], không yêu cầu hai engine bằng nhau tuyệt đối trên dữ liệu bất kỳ.
+- Chia theo doanh nghiệp đo khả năng với doanh nghiệp chưa xuất hiện, chưa đo dự báo tương lai. Tuning chỉ trên validation; test dành đánh giá đã đóng băng [3].
+- Đóng góp: quy trình ETL có đối soát; phân tích có nguồn/mẫu số; đánh giá nhiều thuật toán có baseline; tích hợp ingestion–compute–API–UI. Không đề xuất thuật toán hồi quy mới.
 
-Đây là ma trận thiết kế, chưa phải bộ dependency đã resolve hoặc images đã build. Không tạo requirements/Compose có tag đoán trước. Phase 2 phải chọn patch cụ thể, kiểm tra release/support và scan dependencies trước build; giữ lockfile và image digest. Với PySpark standalone dùng **client deploy mode**: driver ở etl-worker/training-worker, executor ở spark-worker; driver hostname phải phân giải được từ executor.
+## Tham khảo
 
-Nguồn chính thức đã đối chiếu ngày 18/10/2026:
+Nguồn chính thức được mở kiểm tra ngày 05/11/2026; phiên bản cài đặt thực tế nằm trong Dockerfile và requirements.lock.
 
-- [Spark 3.5.7: runtimes và cluster deployment](https://spark.apache.org/docs/3.5.7/).
-- [MongoDB Spark connector compatibility](https://www.mongodb.com/docs/spark-connector/v10.x/).
-- [Spark Kafka integration 3.5.7](https://spark.apache.org/docs/3.5.7/structured-streaming-kafka-integration.html).
-- [MLflow backend stores](https://mlflow.org/docs/latest/tracking/backend-stores/) và [artifact stores](https://mlflow.org/docs/latest/self-hosting/architecture/artifact-store/). SQLite chỉ chứa metadata MLOps; không dùng MongoDB như backend MLflow mặc định.
+[1] Apache Software Foundation, “Performance Tuning,” Apache Spark 3.5.7 Documentation. https://spark.apache.org/docs/3.5.7/sql-performance-tuning.html
 
-## 4. Frontend sitemap và hành vi
+[2] MongoDB, Inc., “$percentile (accumulator operator),” MongoDB Manual. https://www.mongodb.com/docs/manual/reference/operator/aggregation/percentile/
 
-| Route | Trang | API chính |
-| --- | --- | --- |
-| `/login` | Đăng nhập | `/auth/login`, `/auth/me` |
-| `/` | Dashboard tổng quan | `/analytics/overview`, `/analytics/job-trends` |
-| `/analytics/recruitment` | Ngành, địa phương, kinh nghiệm, kỹ năng, doanh nghiệp | Các `/analytics/*` tương ứng |
-| `/analytics/salary` | Histogram, box plot, percentiles, so sánh | `/analytics/salary-distribution`, `/analytics/salary-by-*` |
-| `/jobs` và `/jobs/:id` | Search, filter, phân trang, chi tiết/link nguồn | `/jobs`, `/jobs/filters/options`, `/jobs/{id}` |
-| `/predictions` | Form dự đoán, lịch sử, model version | `/predictions/salary`, `/predictions/history` |
-| `/datasets` và `/datasets/:id` | Upload, versions, quality, lỗi, download report | `/datasets/*`, `/ingestion-runs/*` |
-| `/etl` và `/etl/:id` | Trạng thái, duration, counts, logs, retry/cancel | `/etl/jobs/*` |
-| `/models` và `/models/:id` | Compare metrics, active/rollback, feature importance | `/models/*`, `/training/jobs/*` |
-| `/settings` | Tài khoản, pipeline, quality, nguồn, service status | `/auth/me`, `/system/*` |
+[3] scikit-learn developers, “Cross-validation: evaluating estimator performance,” scikit-learn 1.6.1 Documentation. https://scikit-learn.org/1.6/modules/cross_validation.html
 
-Layout sidebar/header/breadcrumb; màu chính #2563EB, nền #F5F8FC, surface #FFFFFF, text #172B4D. Mọi view có loading/empty/error/success; hỗ trợ bàn phím và nhãn form. TanStack Query polling job có backoff, dừng ở trạng thái terminal. Filter và pagination gửi về backend, có dataset version trong query key; biểu đồ thể hiện sample size, đơn vị, thời kỳ và nhãn DEMO khi có. Không tự sinh dữ liệu hay prediction trên frontend. Action bị từ chối quyền phải được backend kiểm soát dù nút đã ẩn.
+[4] XGBoost developers, “XGBoost Parameters,” XGBoost Documentation. https://xgboost.readthedocs.io/en/release_2.1.0/parameter.html
 
-## 5. Docker services và dependencies dự kiến
+[5] OECD, *Skills for the Digital Transition: Assessing Recent Trends Using Big Data*. Paris: OECD Publishing, 2022, doi: 10.1787/38c36777-en. Phần về nguồn online job postings: https://www.oecd.org/en/publications/skills-for-the-digital-transition_38c36777-en/full-report/component-5.html
 
-| Service | Vai trò và readiness | Persistent storage/profile |
-| --- | --- | --- |
-| mongodb | Auth bật; ping authenticated trước init | mongo-data; core |
-| mongo-init | Tạo application user, validators/indexes; idempotent; exit 0 | core; backend/worker chờ hoàn tất |
-| spark-master | Standalone master RPC/UI | event logs dùng volume riêng; core |
-| spark-worker | Executor; đăng ký master trước ready | core, scale lên 2 cho bằng chứng phân tán |
-| backend | API; ready khi Mongo và migration version đạt | read-only artifacts; core |
-| etl-worker | Claim ETL/ingestion/report/benchmark jobs; Spark driver | uploads, event logs; core |
-| training-worker | Claim training/evaluate jobs; Spark driver | artifacts; core, giới hạn concurrency 1 |
-| frontend | Multi-stage Node build → Nginx; proxy `/api` sang backend | core; HTTP health |
-| kafka | KRaft broker; topic metadata probe | kafka-data; streaming |
-| streaming-worker | Structured Streaming driver | checkpoints; streaming |
-| mlflow | HTTP tracking server | mlflow-db, mlflow-artifacts; mlops |
-
-Network nội bộ cho Mongo/Spark/Kafka; chỉ frontend và dev ports được bind loopback host khi cần. Giao tiếp container dùng `mongodb`, `backend`, `spark-master`, `kafka`, `mlflow`; không dùng localhost giữa containers. Credentials qua môi trường/secrets, `.env.example` chỉ tên biến và giá trị không nhạy cảm; `.env` bỏ khỏi Git. Backend, frontend và workers chạy non-root; mongo-init dùng credential đủ quyền trong tác vụ một lần.
-
-Health dependencies có retry ở application, vì thứ tự start không đảm bảo dịch vụ luôn sống. Restart `unless-stopped` cho long-running services. Persistent volumes cho raw files, MongoDB, artifacts, checkpoint và event logs. Backup Mongo và artifacts cùng manifest; restore sang project/volume riêng rồi kiểm tra hash và prediction parity trước sử dụng.
-
-Ngân sách thử ban đầu (đề xuất, chưa đo): Docker Desktop/WSL2 cấp 12 GB RAM, 6 CPU, 20 GB đĩa trống; 2 worker × 1 core, executor memory 1 GB, driver 1 GB; không chạy ETL và training đồng thời. Máy ít tài nguyên dùng một worker để phát triển, nhưng phải chạy lại bằng hai worker khi thu bằng chứng. Nhiều container trên một máy chứng minh thực thi qua executor, không chứng minh mở rộng nhiều máy vật lý.
-
-## 6. Cấu trúc dự kiến khi triển khai
-
-```text
-frontend/src/{app,pages,features,components,lib}
-backend/src/recruitment/
-  api/{v1,routers,schemas,dependencies}
-  application/{use_cases,services,commands,queries}
-  domain/{entities,value_objects,enums,exceptions,rules}
-  ports/{repositories,messaging,model_serving,storage}
-  adapters/{mongodb,kafka,mlflow,ml}
-  infrastructure/{config,logging,security,monitoring}
-  main.py
-backend/tests/
-bigdata/{ingestion,quality,schemas}
-bigdata/spark/{batch,streaming,transformations,aggregations}
-machine_learning/{datasets,features,training,evaluation,inference,registry}
-workers/
-infrastructure/{docker,mongo-init,kafka,mlflow}
-scripts/
-tests/{unit,integration,e2e,performance}
-docs/
-docker-compose.yml
-docker-compose.streaming.yml
-.env.example
-```
-
-Không tạo thư mục/module rỗng để coi như hoàn thành tính năng. Chỉ thêm abstraction có ít nhất một use case cụ thể.
-
-## 7. Rủi ro và cách xử lý
-
-| Rủi ro | Xử lý và điều kiện phát hiện |
-| --- | --- |
-| Thiếu dataset thật có giấy phép | Nhận file người dùng được phép sử dụng; lưu provenance/license; bộ seed DEMO tách riêng |
-| Dữ liệu ít nhãn lương, lệch nguồn | Báo coverage và error theo nhóm; từ chối train khi quá ít nhóm/mẫu; không tuyên bố đại diện thị trường |
-| Nhiều repost gây leakage | Dedup trước split; group company/job và temporal cutoff; lưu split manifest |
-| Thiếu RAM khi benchmark | Chạy tăng dần 100 → 10k → 100k; 1m là tùy tài nguyên; lưu lần OOM thực tế |
-| Artifact không tương thích hoặc bị thay | Lock môi trường, allowlist path, checksum; không load artifact do người dùng upload |
-| Worker chết khi đang publish | Fencing token, attempt scope và CAS pointer; xem database/pipelines |
-| Docker bị giới hạn truy cập trong phiên | Tách trạng thái thiết kế khỏi runtime; cung cấp lệnh và expected outcome, thu log thực khi môi trường cho phép |
+Xem [pipeline và phương pháp](pipelines.md), [schema thực tế](database.md), [audit và nghiệm thu lần nâng cấp](reports/research-upgrade.md). Các báo cáo phase cũ ghi lại lần chạy lịch sử của source tương ứng.

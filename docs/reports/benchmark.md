@@ -1,5 +1,7 @@
 # Spark benchmark — actual measurements
 
+> Bằng chứng lịch sử ngày 18–19/10/2026, không phải kết quả chạy lại source nâng cấp 05/11/2026. Xem [audit và trạng thái kiểm chứng mới](research-upgrade.md). Đã kiểm tra lại 27 observations/summary và hash source archive bằng `scripts/verify_benchmark_evidence.py`. Benchmark schema 2 dùng classifier ETL chung và checksum tất cả normalized fields; workload đã thay đổi nên cần đo mới, không gán các timing cũ cho code mới.
+
 Run ID: `05c97cb6-a354-49db-86be-845bc490a5d3`, ngày 18/10/2026. DEMO seed 42, warm-up một lần không tính, ba lần đo mỗi cấu hình/quy mô. Counts và checksum output khớp giữa mọi cấu hình và lần lặp.
 
 | Input rows | Spark local[1], median giây | Cluster 1 executor, median giây | Cluster 2 executors, median giây | Speedup cluster 2 / local[1] |

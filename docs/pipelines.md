@@ -1,106 +1,68 @@
-# ETL, Spark và Machine Learning
+# Pipeline dữ liệu, analytics và Machine Learning
 
-## 1. Ingestion và dữ liệu
+Tài liệu mô tả source hiện tại; bằng chứng runtime mới và phần BLOCKED nằm ở [báo cáo nâng cấp](reports/research-upgrade.md). Thiết kế ban đầu chưa triển khai không được coi là kết quả.
 
-Upload giới hạn khởi điểm 50 MiB (cấu hình được), chấp nhận CSV UTF-8/UTF-8 BOM, JSON array và JSONL; mỗi record tối đa 1 MiB. Không tin MIME/extension đơn thuần. Stream file đến vùng staging, tính SHA-256, lưu manifest rồi enqueue ingestion; không parse file lớn trong HTTP request. File upload trả 202 chỉ sau khi durable file reference và job metadata được ghi. Nếu ghi Mongo thất bại, cleanup file orphan bằng reconciler, không trả thành công giả.
+## Ingestion và nguồn
 
-Nguồn API/offline dùng adapter riêng: URL/host và offline root được allowlist, timeout/rate limit; cấm đường dẫn ra ngoài root và SSRF. Lưu source, license/permission, thời kỳ, mapping schema và is_demo. Không triển khai crawler vượt CAPTCHA. Chưa có dataset thật được cung cấp; bộ test synthetic dùng seed 42, gắn DEMO trên dataset, dashboard, exports và báo cáo model.
+Upload CSV/JSON/JSONL tối đa 50 MiB, streaming ghi file và SHA-256 trước enqueue. CSV giữ dòng dư cột thành parse error; JSONL giữ original_line hỏng; JSON array bị hỏng toàn file khiến run FAILED. Raw payload và file gốc giữ nguyên để đối soát. Mỗi raw có record_number, raw_record_ref, dataset_version, source và ingested_at. Dataset lưu source, is_demo, hash, original_filename, schema_version, file_ref, format và created_at.
 
-Raw giữ toàn bộ input kể cả lỗi parse: với dòng hỏng lưu `raw_payload.original_line` và error metadata. JSON hỏng toàn bộ file tạo run FAILED và file reference, không báo tổng record giả định. CSV có record_number ổn định theo parser và giữ raw source file; không đánh số theo partition không ổn định.
+Form upload có thêm `source_metadata` là JSON tùy chọn: source_type (upload/offline/api/synthetic), collected_at, observation_from, observation_to và license_permission. Các ngày dùng YYYY-MM-DD; kiểm tra thứ tự thời kỳ. Không có metadata thì lưu object rỗng, không tự suy ra giấy phép/ngày thu thập từ ngày upload. is_demo và tên nguồn do người nhập khai báo; hệ thống chưa xác minh độc lập quyền sử dụng. Không tự crawl nguồn bên ngoài. Metadata khác với cùng idempotency key trả 409; request cũ không gửi metadata vẫn hợp lệ.
 
-Idempotency cùng user/key và payload hash trả run cũ; cùng key nhưng payload khác trả 409. Raw unique `(ingestion_id, record_number)` giữ cả những bản trùng nội dung để audit. Cùng dataset/content/schema/pipeline config hash được nhận diện trong datasets; thay cấu hình pipeline tạo version dẫn xuất dù input không đổi. Input file persisted vào volume, không chỉ tồn tại trong filesystem tạm container.
+## Spark ETL và quality gate
 
-## 2. ETL trên Spark
+Luồng: Raw → Validation → Normalization → Deduplication → Clean → Quality Gate → Analytics-ready → Publish. Batch mặc định đọc canonical raw JSONL trên volume, repartition(4); Mongo connector là smoke experiment riêng, không phải nguồn đọc ETL mặc định.
 
-| Bước | Xử lý | Output và kiểm tra |
+Normalization dùng Unicode NFC, trim/collapse whitespace, lowercase company/title keys và unique lowercase skills. Chưa có taxonomy đáng tin cậy nên không tự map tỉnh/ngành/chức danh sang danh mục chuẩn. Title/company thiếu hoặc sai kiểu, parse lỗi, kinh nghiệm không phải số hữu hạn trong [0,60] là invalid. Kinh nghiệm không cung cấp giữ null, khác 0 năm. Ngày đăng không parse được giữ null; không lấy ngày import thay thế. Salary không có midpoint vẫn có thể là clean và tham gia thống kê tin.
+
+Dedup chỉ theo `source:source_job_id` nếu có, nếu không là SHA-256 của raw JSON sort keys. Không fuzzy merge, không tự canonicalize URL hay suy business key. Trong các record hợp lệ, record_number nhỏ nhất (tie-break raw ref) là canonical. `_global_duplicate_ref` do streaming ledger tạo được đưa vào duplicate. Invalid được ưu tiên trước duplicate. Các tin giống nghĩa nhưng khác payload/source ID có thể vẫn còn; group theo company giảm leakage trong trường hợp cùng doanh nghiệp nhưng không bảo đảm xử lý mọi repost khác doanh nghiệp.
+
+Mỗi attempt phải thỏa `raw = invalid + duplicate + clean`; sai thì raise lỗi trước công bố. Bulk upsert theo attempt/raw ref chịu được retry task; version đã PUBLISHED không ghi đè. Quality report lưu counts, thresholds và normalization config; salary coverage không chặn phân tích số tin. Gate mặc định validity ≥0,90 và clean >0; consistency được đo/báo cáo, hiện chưa phải một ngưỡng gate riêng.
+
+| Chỉ số | Tử số | Mẫu số |
 | --- | --- | --- |
-| Read | Mongo connector đọc đúng raw version bằng partitioned scan | Schema tường minh, partition count, input count |
-| Validate | Required title/company/source; kiểu số/ngày/URL/enum | Fatal → invalid; recoverable → normalized kèm warning |
-| Clean | Unicode NFC, trim whitespace, HTML stripping, map địa phương/ngành có version, skills canonical | Giá trị gốc vẫn ở raw; không tự suy diễn trình độ/kinh nghiệm |
-| Salary | Parse, chuẩn hóa tiền và kỳ hạn theo provenance | Bounds/target nullable, parse status, assumptions |
-| Dedup | Stable matching, chọn canonical deterministic | Một canonical + duplicate evidence |
-| Quality | Tính counts, coverage và gates | Báo cáo bất biến theo attempt |
-| Analytics | Spark SQL groupBy, explode skills, time buckets, percentiles | Snapshot rows theo dimensions và manifest |
-| Publish | Xác minh manifest, fencing và CAS pointer | Version hoàn chỉnh; xem thiết kế MongoDB |
+| Completeness | Ô title/company/source có giá trị sau normalization | 3 × raw |
+| Validity | raw − invalid | raw |
+| Uniqueness | clean | raw − invalid |
+| Consistency | clean có title/company, experience null hoặc [0,60], midpoint null hoặc khớp bounds dương/sắp đúng (sai lệch <1 VND) | clean |
+| Salary label usability | clean có midpoint >0, bao gồm NET | clean |
+| Local training eligibility | clean có midpoint >0, basis khác NET | clean |
+| Missing từng field | null/rỗng/Unknown sau normalization ở field đó | raw |
+| Timeliness | clean có ngày đăng trong 180 ngày vừa qua, không ở tương lai | clean |
 
-Ưu tiên DataFrame/Spark SQL built-ins; UDF chỉ cho parser/quy tắc không thể thể hiện rõ bằng expressions, có unit test. Không `toPandas()` hay `collect()` toàn bộ dataset. Chỉ collect metrics nhỏ có giới hạn. Join/dedup/window có shuffle; ghi physical plan và tasks để chứng minh compute thật. Mongo writes qua connector hoặc `foreachPartition` + bounded bulk upsert, chịu được task retry.
+Mẫu số 0 trả null (NOT_COMPUTABLE). Đây là các quy tắc chất lượng có phạm vi cụ thể, không phải kiểm chứng tính đúng sự thật của nguồn. Raw values vẫn tồn tại để kiểm tra.
 
-Dedup theo thứ tự source+source_job_id, canonical URL (bỏ tracking query có allowlist), content hash, rồi business key đủ thông tin. Không gộp chỉ vì cùng title/company. Business key phải có location, employment type và posted date khi sử dụng; thiếu khóa đủ tin cậy thì giữ record và cảnh báo. Fuzzy matching là bước tùy chọn, chưa tự động gộp trong phiên bản đầu. Trong nhóm, canonical là raw record có record_number nhỏ nhất (thêm _id để tie-break). Repost across versions không xóa lịch sử; group-aware ML split vẫn bảo vệ leakage.
+## Nhãn lương và giới hạn
 
-## 3. Chuẩn hóa lương
+Hai bounds hữu hạn, dương, đúng thứ tự → midpoint sau FX và quy đổi chu kỳ. Lương một giá trị được coi là hai bounds bằng nhau. Một phía (up to/from) → chỉ bound, midpoint null. Negotiable/competitive/thỏa thuận → undisclosed, không thay 0. Âm/đảo khoảng/không parse được → target null, giữ status. Kỳ hạn hỗ trợ MONTH/YEAR/HOUR/DAY; WEEK hoặc text weekly giữ target null với UNSUPPORTED_PERIOD.
 
-| Input | Quy tắc và target |
-| --- | --- |
-| 10–15 triệu VND/tháng | min 10m, max 15m, midpoint 12.5m |
-| 20 triệu/tháng | Hai bounds 20m khi currency VND được nêu trong mapping có nguồn; nếu không xác định currency thì target null |
-| 1.000 USD/tháng | Parser theo locale nguồn; FX có source/date, thiếu FX → giữ USD, target VND null |
-| 15–20 USD/giờ | Nhân FX và hours_per_month đã cấu hình, ghi assumption; thiếu một trong hai → null |
-| Lương năm/ngày | Chia 12 hoặc nhân days_per_month; công khai assumption |
-| Up to 30 triệu | Chỉ upper bound, midpoint null |
-| From 15 triệu | Chỉ lower bound, midpoint null |
-| Negotiable/Competitive/không công khai | undisclosed; bounds/target null |
-| Net hoặc gross | Giữ salary_basis; không tự đổi net thành gross |
-| min > max, âm, số không hợp lệ | Salary invalid, không tự đảo bounds; record vẫn có thể dùng cho thống kê tin |
+Tiền tệ lấy từ trường currency hoặc tokens USD/$/VND/triệu trong text. Giá trị mơ hồ không tự gán FX; cần bảng rates có rate dương/source/date. Lương năm chia 12; giờ/ngày cần hours_per_month/days_per_month đã cấu hình. Assumptions và FX provenance lưu theo record, normalization config đóng băng theo version. Không tự dùng tỷ giá hiện tại hay chuyển NET sang GROSS. Có thể còn sai biệt locale/kỳ hạn diễn đạt không được parser hỗ trợ; giữ raw và kiểm tra theo nguồn trước dùng dữ liệu thật.
 
-FX lấy từ bảng cấu hình có provenance được admin import; không mặc định tỷ giá giả. Fixture test dùng FX có nhãn TEST và ngày tham chiếu, không dùng làm tỷ giá thị trường. Không xóa silently outlier; gắn status và rule version. Trong ML ban đầu chỉ nhận GROSS hoặc UNKNOWN với thống kê tỷ lệ UNKNOWN và cảnh báo định nghĩa target; NET bị loại để không trộn basis đã biết. Nếu nghiệp vụ cần gross thuần, bật gate yêu cầu GROSS, chấp nhận giảm mẫu. Cấu hình này được lưu theo experiment.
+ML chỉ đọc published version/attempt, midpoint >0, salary_basis != NET. GROSS và UNKNOWN cùng vào mô hình; basis_counts được lưu, UNKNOWN làm giảm khả năng so sánh. Dữ liệu không có nhãn vẫn ở clean cho analytics; không loại khỏi mẫu số số tin.
 
-## 4. Chất lượng và đối soát
+## Analytics
 
-Định nghĩa terminal outcome: invalid trước, rồi duplicate trong tập đủ điều kiện, còn lại clean. Các lỗi parser ingestion được tính vào raw và invalid của ETL. Mỗi attempt phải thỏa `N_raw = N_invalid + N_duplicate + N_clean`. Count lỗi theo field có thể lớn hơn số invalid, phải báo tách riêng. Retry không làm tăng count của attempt được công bố.
+Không filter: snapshot schema 2 từ Spark. Có province/industry/posted_from/posted_to hoặc snapshot lịch sử schema 1: Mongo aggregation live trên đúng published attempt. Không sửa snapshot cũ. Mọi response có version/attempt, số tin/nhãn, missing_salary_rate, reference_period, source và filters. Ngày kết thúc bao gồm cả ngày UTC bằng điều kiện nhỏ hơn ngày kế tiếp. Không có filter experience/remote ở API hiện tại.
 
-| Chỉ số | Công thức |
-| --- | --- |
-| Completeness | Số ô required có giá trị / (N_raw × số required fields); report thêm từng field |
-| Validity | (N_raw − N_invalid) / N_raw |
-| Uniqueness | N_clean / (N_raw − N_invalid) |
-| Consistency | Số clean pass các quy tắc chéo / N_clean |
-| Timeliness | Số clean có posted_at hợp lệ trong max_age_days / N_clean; ngày thiếu tính không đạt |
-| Salary label usability | Số clean có target đủ điều kiện / N_clean |
+Overview có số doanh nghiệp, ngành/tỉnh có thông tin (không đếm Unknown), nhãn lương, mean/median và percentiles. Group theo industry/province/số năm kinh nghiệm/company có số tin, số nhãn, mean, median, missing rate; p25/p75/p90 chỉ hiện khi có ≥30 nhãn. Nhóm nhỏ có warning; frontend không vẽ so sánh median ngành dưới ngưỡng. Threshold 30 là guardrail trình bày, không bảo đảm ý nghĩa thống kê. Median vẫn là mô tả mẫu nhỏ. Kỹ năng đếm mỗi tin một lần/skill; trends theo tháng đăng; histogram buckets 5 triệu VND/tháng. Group top 100, skills top 30, trends 120 tháng là giới hạn trả kết quả, không phải toàn bộ danh mục.
 
-Mẫu số 0 → null và ghi `NOT_COMPUTABLE`; không gán 100%. Gate khởi điểm đề xuất: validity ≥0.90, consistency=1, N_clean>0; salary coverage chỉ gate training, không chặn analytics về số tin. Threshold lưu theo report và có revision. Để demo lỗi gate, dùng dataset cố ý nhiều lỗi; output lưu để truy vết nhưng không đổi active pointer. Ngưỡng là quyết định cấu hình cần hiệu chỉnh theo dữ liệu thật, không phải kết quả đo.
+Spark percentile_approx accuracy=10000 và Mongo $percentile approximate là hai phương pháp xấp xỉ; không cộng median giữa các nhóm. Counts/mean phải thống nhất theo filter, percentile chỉ đối chiếu với sai số xấp xỉ phù hợp. Không tạo insight thị trường hardcode. Mỗi nhóm biểu đồ ghi câu hỏi, đơn vị, mẫu/bộ lọc/thời kỳ và giới hạn diễn giải.
 
-Analytics đầu tiên hỗ trợ date range, province, industry, experience, remote type. Snapshot lưu các tổ hợp dimensions cần filter kết hợp, không cộng median từ các nhóm. Với tổ hợp filter không materialize, dùng query Mongo giới hạn version và giới hạn tài nguyên, hoặc enqueue snapshot job trả 202; không tự bỏ filter. Mean tính từ sum/count; kỹ năng đếm tin chứa skill unique; time trend theo posted_at, không dùng ngày import thay thế. Mỗi response có sample size, eligible count, missing salary rate, method và cập nhật.
+## ML: local và Spark là hai nhóm thí nghiệm
 
-## 5. Job ownership và failure recovery
+Local models: Dummy median, Ridge(alpha=10), Random Forest, Gradient Boosting, XGBoost CPU. Reservoir tối đa 10.000 labels seed 42; 200 labels và 10 company groups tối thiểu; từng split ≥30. GroupShuffleSplit test 15% groups seed 42; validation tỷ lệ 0,15/0,85 groups seed 43. Tỷ lệ số rows không nhất thiết đúng 70/15/15. Manifest giữ record IDs, seeds, counts, dataset hash, target rule và basis counts. Nếu source_job_key xuất hiện qua nhiều split thì từ chối training.
 
-State machine: PENDING → QUEUED → RUNNING → COMMITTING → COMPLETED; PENDING/QUEUED có thể CANCELLED; RUNNING → FAILED hoặc CANCEL_REQUESTED → CANCELLED; COMMITTING không hủy. FAILED tạo attempt mới qua retry → QUEUED tối đa 3 lần cho lỗi transient. Lỗi schema/quality không auto-retry; cần chỉnh input/config và tạo version mới. Checkpoints tiến trình không đồng nghĩa COMPLETED.
+Preprocessing DictVectorizer chỉ fit train; categorical Unknown-safe, skills indicators; features allowlist không có salary/parse status/FX. dict-v2 dùng experience=0 làm giá trị tính toán cùng indicator experience_missing=1 khi thiếu; clean vẫn null. Nhờ indicator, thiếu khác 0 năm quan sát. Pipeline lưu cùng artifact. Model dict-v1 cũ tiếp tục inference với các đặc trưng cũ; DictVectorizer bỏ qua key missing mới chưa có trong vocabulary.
 
-Lease khởi điểm 60 giây, heartbeat 15 giây. Claim và renew kiểm tra worker_id/fencing token. Recovery chỉ requeue khi lease hết và chưa COMMITTING; stale worker dừng khi renew thất bại. Các output được scope theo attempt nên ghi muộn không thay snapshot hiện hành. RUNNING cancel gọi Spark cancelJobGroup và đợi compute dừng; chỉ sau đó mark CANCELLED. Nếu không xác nhận dừng, giữ CANCEL_REQUESTED và thông báo, không tuyên bố đã hủy.
+Chốt winner bằng validation MAE, tie-break RMSE trước mở test. Sau đó đánh giá toàn bộ candidates đã đóng băng và median baseline trên cùng test IDs. MAE/RMSE/MedAE đơn vị VND/tháng; R² không có đơn vị, null nếu target hằng hoặc ít hơn hai mẫu. Không tuning hoặc chọn lại winner từ bảng test.
 
-Log JSON có request_id, job_id, attempt_id, stage, counts, duration; sanitize exception trước lưu. Retry classification: network timeout/broker unavailable là transient; salary parse/schema input là lỗi dữ liệu. Reconciler xử lý orphan file, metadata publish dang dở và lease expiry có audit.
+Holdout lưu actual/predicted/residual, scatter, residual histogram và weights/importance. Slice errors theo industry, province, experience (<1, 1–<3, 3–<5, 5+, Unknown), salary buckets 10 triệu và exact normalized title. Chỉ tính metrics cho nhóm ≥30; lưu số nhóm bị suppress. Salary band chỉ phục vụ chẩn đoán sau khi biết actual, tuyệt đối không đưa vào X. Importance/coefficient không phải quan hệ nhân quả.
 
-## 6. ML dataset, split và models
+Spark MLlib LinearRegression chỉ dùng observed experience, toàn bộ eligible clean thuộc train companies của manifest local; validation/test cũng loại missing experience. Cần train≥100 và validation/test≥30 sau loại missing. Lưu training companies/count, validation/test IDs, dataset/attempt và eligibility predicate. Vì khác feature và có thể khác sample/count nên không xếp cùng bảng để kết luận thuật toán tốt hơn. Numeric coefficient/intercept xuất JSON giúp inference không khởi động Spark trong request; artifact pipeline Spark vẫn được lưu.
 
-Chỉ đọc một published dataset version + attempt. Lưu ordered record IDs/hash, target rule, feature schema và split manifest. Features đầu tiên: title, industry, province/city, experience, seniority, education, employment/remote type, skills. Description chỉ thêm sau khi loại đoạn lương và kiểm tra leakage; không dùng salary_*, parse status, FX, quality score hoặc trường dẫn xuất target làm input.
+Temporal holdout là đề xuất riêng khi có ngày đăng đáng tin cậy, chưa chạy và không thay group split hiện tại. Ablation đề xuất: experience → +title → +industry/province → +skills và categorical còn lại; dùng cùng IDs/seeds, fit lại preprocessing trên train, cùng validation MAE và holdout đóng băng; chưa chạy vì hiện chỉ có DEMO và chưa kiểm chứng nguồn thực. Không trình bày như kết quả đã đạt.
 
-Ưu tiên temporal split 70/15/15 theo posted_at hợp lệ, ngày cutoff được lưu. Các group cùng canonical job/repost không xuất hiện ở nhiều split: group cắt qua cutoff được quarantine khỏi experiment, báo số lượng bị loại. Nếu thiếu ngày đủ tin cậy, dùng group split seed 42 theo company/job group, đánh dấu không phải đánh giá tương lai. Tách thử nghiệm group theo company để đo khả năng tổng quát cho doanh nghiệp mới. Không shuffle rồi bỏ qua repost leakage.
+## Serving, job recovery và streaming
 
-Gate khởi điểm cho training: ≥200 labels, train ≥100, validation/test mỗi tập ≥30 và ít nhất 5 groups; nhỏ hơn thì trả `INSUFFICIENT_TRAINING_DATA`. Bộ 100 dòng dùng ETL smoke, không coi là benchmark ML đáng tin cậy. Minimums là guardrail vận hành, không đảm bảo chất lượng thống kê.
+Serving validate → resolve active pointer → checksum/allowlisted artifact load → predict finite/positive → persist personal history. Fallback artifact trước đã xác minh phải trả đúng version và warning. Response giữ model/dataset version, reference period, test metrics, DEMO/OOD warnings; không confidence % hoặc interval chưa hiệu chuẩn. dict-v2 giữ categories train để cảnh báo unseen. MAE không phải sai số bảo đảm cho từng cá nhân.
 
-Preprocessing chỉ fit trên train: numeric imputation, categorical unknown-safe encoding, skills vectorization/TF-IDF. Các thống kê clipping/outlier và vocabulary fit train, áp dụng nguyên trạng cho validation/test. Lưu preprocessing cùng model artifact. Spark MLlib pipeline riêng có parity test cho feature mapping/inference; không giả định vector scikit-learn và MLlib tự tương thích.
-
-| Model | Vai trò |
-| --- | --- |
-| DummyRegressor median | Baseline, dùng đúng train target |
-| LinearRegression hoặc regularized linear | Mốc tuyến tính; pipeline scikit-learn |
-| RandomForestRegressor | Mốc phi tuyến; sampling có giới hạn nếu local |
-| Spark GBTRegressor | Pipeline MLlib phân tán trên dataset lớn |
-| XGBRegressor | So sánh thêm trên sample có seed/manifest và memory cap |
-
-Tuning theo validation MAE, tie-break RMSE; cùng split và sample khi so thuật toán trực tiếp. Nếu Spark dùng full data còn local models dùng sample, trình bày thành hai thí nghiệm riêng, không kết luận chênh lệch chỉ do model. Mọi candidate báo validation MAE/RMSE/R²/MedAE; baseline trên cùng test. Sau khi chốt winner, freeze config, đánh giá một lần holdout winner và baseline. Nếu cần test metrics của nhiều models cho báo cáo, freeze toàn bộ candidates trước mở test; không active model khác dựa trên bảng test.
-
-Artifact kết quả gồm actual/predicted/residual theo test record ID, split metadata; biểu đồ scatter/residual, validation comparison và feature importance phù hợp model. Slice metrics theo industry/location/seniority/salary range, kèm n; nhóm nhỏ hiển thị thiếu mẫu thay vì kết luận. R² không xác định với target hằng/ít mẫu → null kèm reason, không JSON NaN. SMAPE tùy chọn, quy tắc mẫu số được ghi rõ.
-
-Registry: TRAINING → EVALUATING → CANDIDATE → ACTIVE → ARCHIVED; lỗi → FAILED. Evaluation gate bao gồm artifact hash/load, finite predictions, feature schema và validation tốt hơn baseline theo margin cấu hình. ACTIVE dùng singleton pointer MongoDB; trạng thái trong registry là metadata do reconciler đồng bộ. Active/rollback phải kiểm tra artifact còn tồn tại và quyền admin.
-
-MLflow profile bật thì ghi runs, parameters, metrics và artifacts; Mongo giữ experiment/business model metadata và artifact references. Khi profile tắt, artifact lưu volume nội bộ + manifest checksum, không hiển thị link MLflow giả. Artifact chỉ do training worker tin cậy tạo; không nhận pickle/joblib upload từ người dùng. Serving chỉ load allowlisted path có checksum và environment tương thích. Spark model serving dùng adapter/runtime Spark riêng hoặc session được quản lý ở serving process; tránh khởi động Spark cho từng request và không đưa training vào API. Chốt adapter qua latency test trước active model MLlib.
-
-## 7. Inference và streaming
-
-Inference: validate → canonical feature mapping → resolve active model một lần → verify/load cached immutable artifact → predict → finite/positive check → persist history → response. Không active model trả 503 `MODEL_NOT_AVAILABLE`. Artifact active lỗi có thể fallback về model trước đã xác minh; response ghi đúng model thực tế và warning, không âm thầm giả lập prediction. Nếu không có artifact dùng được, trả lỗi.
-
-Không mặc định khoảng dự đoán. Nếu làm conformal interval, cần calibration subset riêng ngoài validation dùng để tuning và test cuối; báo empirical coverage và điều kiện exchangeability. Nếu chưa hiệu chuẩn, response không có interval/confidence phần trăm. OOD dựa trên category chưa thấy, numeric range train; là warning có căn cứ, không phải độ tin cậy xác suất.
-
-Kafka topics: `recruitment.jobs.raw`, `.invalid`, `.processed`, `recruitment.pipeline.events`. Event có event_id, source key, schema_version, occurred_at, payload, is_demo. Spark Structured Streaming đọc raw topic với checkpoint volume và giới hạn offsets per trigger. `foreachBatch` ghi raw/clean/invalid idempotent theo event_id và business key; lưu batch manifest. Đây là at-least-once delivery với idempotent writes, không tuyên bố exactly-once xuyên Kafka/Mongo.
-
-Streaming dùng dataset window/version riêng; không sửa published batch version. Microbatch tạo version hoàn chỉnh hoặc tích lũy staging theo window rồi publish; chỉ hiển thị sau quality gate. Restart sử dụng cùng checkpoint và query identity; checkpoint bị mất có thể replay, unique keys vẫn chống trùng. Test broker down/up, poison message, worker kill/restart và input rate/backpressure. Profile streaming chỉ được nghiệm thu sau khi toàn bộ kịch bản recovery chạy thật.
+Job queue Mongo claim/lease/fencing; output scope attempt; CAS PUBLISHED rồi CAS active pointer; retry tối đa 3 theo repository policy. Không chạy recovery phá phiên làm việc trong lần nâng cấp này. Kafka Structured Streaming profile là ingestion mở rộng: checkpoint volume, tối đa 100 offsets/trigger, event-ID ledger, immutable microbatch versions rồi batch ETL chuẩn. Delivery at-least-once với idempotent sink, không exactly-once xuyên hệ thống. MLflow tùy chọn, không ép bật. Xem reports phase-9 cho bằng chứng lịch sử, không coi là retest của source vừa sửa.

@@ -2,6 +2,14 @@
 
 Recruitment Data Analytics and Job Salary Prediction System. React/FastAPI/MongoDB, Spark ETL và ML chạy ở worker riêng, triển khai bằng Docker Compose.
 
+## Bài toán và phạm vi nghiên cứu
+
+Hệ thống mô tả **các tin tuyển dụng trong tập dữ liệu quan sát**, ước lượng **midpoint lương công bố theo tháng VND** từ thông tin công việc và kiểm chứng workload Spark ở các quy mô xác định. Số tin không phải tổng nhu cầu lao động, lương công bố không phải bảo đảm lương thực nhận, và kết quả DEMO không đại diện cho Việt Nam.
+
+[Phát biểu bài toán, input/output, giả thuyết và tham khảo](docs/architecture.md) · [Quy tắc dữ liệu/nhãn/split/metrics](docs/pipelines.md) · [Audit, thay đổi, PASS/BLOCKED và kịch bản bảo vệ](docs/reports/research-upgrade.md).
+
+Lần rà soát 05/11/2026 giữ kiến trúc và API hiện có, bổ sung metadata nguồn tùy chọn, phân biệt missing experience với 0 năm, đo quality thay vì hardcode, group salary statistics và error slices. Các số đo ở phần bằng chứng lịch sử bên dưới thuộc source ngày 18/10; **chưa chạy lại Spark/Mongo E2E của source mới vì Docker daemon không khả dụng**. Không dùng số đo cũ để nghiệm thu hiệu năng code mới.
+
 ## Khởi động
 
 Cần Docker Desktop chạy Linux containers/WSL2. Lần build đầu cần Internet. Trong thư mục dự án, chạy PowerShell:
@@ -23,14 +31,14 @@ Dữ liệu hiện có là **DEMO tổng hợp, seed 42**, không đại diện 
 
 ## Môi trường Python venv và cài thư viện
 
-Dùng **Python 3.11** để đồng nhất với backend/Spark trong Docker. Chạy các lệnh tại thư mục gốc `D:\HK7\BigData\DoAnCuoiKy`. Windows Terminal và terminal trong VS Code có thể mở PowerShell, CMD hoặc Git Bash; chọn đúng nhóm lệnh theo shell đang sử dụng.
+Dùng **Python 3.11** để đồng nhất với backend/Spark trong Docker. Chạy các lệnh tại thư mục gốc `D:\HK7\BigData\RecruitInsight`. Windows Terminal và terminal trong VS Code có thể mở PowerShell, CMD hoặc Git Bash; chọn đúng nhóm lệnh theo shell đang sử dụng.
 
 File cài đặt là [requirements.txt](requirements.txt), tham chiếu toàn bộ 46 thư viện đã khóa phiên bản trong [backend/requirements.lock](backend/requirements.lock). Các thư viện chính gồm FastAPI, Uvicorn, PyMongo, Pydantic, PyJWT, Argon2, PySpark, NumPy, SciPy, scikit-learn, XGBoost CPU, Matplotlib, HTTPX và pytest. Không cần cài từng thư viện bằng tay.
 
 ### PowerShell — Windows Terminal hoặc VS Code
 
 ```powershell
-cd D:\HK7\BigData\DoAnCuoiKy
+cd D:\HK7\BigData\RecruitInsight
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -50,8 +58,8 @@ Nếu PowerShell báo không cho chạy `Activate.ps1`, có thể cài trực ti
 ### Git Bash trên Windows
 
 ```bash
-cd /d/HK7/BigData/DoAnCuoiKy
-py -3.12 -m venv .venv
+cd /d/HK7/BigData/RecruitInsight
+py -3.11 -m venv .venv
 source .venv/Scripts/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -62,8 +70,8 @@ python --version
 ### CMD — Command Prompt
 
 ```bat
-cd /d D:\HK7\BigData\DoAnCuoiKy
-py -3.12 -m venv .venv
+cd /d D:\HK7\BigData\RecruitInsight
+py -3.11 -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt

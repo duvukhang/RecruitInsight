@@ -119,6 +119,20 @@ function Badge({ status }: { status: string }) {
     </span>
   );
 }
+function ObservationScope({ meta }: { meta?: Row }) {
+  const filters = useContext(Context);
+  if (!meta) return null;
+  const period = meta.reference_period;
+  return (
+    <div className="data-foot">
+      {meta.is_demo && <div className="demo-notice">DEMO · Dữ liệu tổng hợp, không đại diện thị trường lao động thực.</div>}
+      Dataset <ShortId id={meta.dataset_version} /> · {meta.sample_size} tin · {meta.eligible_count} nhãn lương · Thiếu nhãn: {meta.missing_salary_rate == null ? "—" : (100 * meta.missing_salary_rate).toFixed(1) + "%"}
+      <br />
+      Ngày đăng quan sát: {period?.from ? `${period.from.slice(0, 10)} – ${period.to?.slice(0, 10)}` : "Chưa có ngày đăng hợp lệ"} · Địa phương: {filters.province || "Tất cả"} · Ngành: {filters.industry || "Tất cả"} · Ngày lọc: {filters.postedFrom || "Mở"} – {filters.postedTo || "Mở"}
+      <p>Số tin chỉ mô tả tập dữ liệu quan sát. Lương công bố (VND/tháng) có thể khác lương thực nhận; quan hệ đồng xuất hiện không chứng minh nguyên nhân.</p>
+    </div>
+  );
+}
 function Table({
   columns,
   rows,
@@ -219,7 +233,7 @@ function Dashboard() {
           </div>
           <div className="chart-grid">
             <Panel
-              title="Xu hướng tuyển dụng"
+              title="Số tin thay đổi thế nào theo tháng?"
               subtitle="Số tin theo tháng đăng tuyển"
             >
               <Status query={trends}>
@@ -231,7 +245,7 @@ function Dashboard() {
               </Status>
             </Panel>
             <Panel
-              title="Nhu cầu theo ngành"
+              title="Ngành nào xuất hiện nhiều tin nhất?"
               subtitle="Số tin trong tập dữ liệu đã xử lý"
             >
               <Status query={industry}>
@@ -265,6 +279,14 @@ function Dashboard() {
             mẫu · {meta.method} · Cập nhật{" "}
             {new Date(meta.updated_at).toLocaleString("vi-VN")}
           </div>
+          <p className="muted">{data.total_industries ?? "—"} ngành · {data.total_provinces ?? "—"} địa phương có thông tin.</p>
+          <div className="panel-links">
+            <Link to="/analytics/recruitment">Phân tích tin tuyển dụng</Link>
+            <Link to="/analytics/salary">Khảo sát mức lương</Link>
+            <Link to="/models">Đánh giá mô hình</Link>
+            <Link to="/predictions">Dự đoán mức lương</Link>
+          </div>
+          <ObservationScope meta={meta} />
         </>
       )}
     </Status>
@@ -282,9 +304,10 @@ function Analysis({ salary = false }: { salary?: boolean }) {
   const overview = useData("/analytics/overview", true);
   return (
     <>
+      <Status query={overview}><ObservationScope meta={overview.data?.meta} /></Status>
       <div className="chart-grid">
         <Panel
-          title={salary ? "Phân phối mức lương" : "Tuyển dụng theo địa phương"}
+          title={salary ? "Lương công bố phân bố ra sao?" : "Địa phương nào có nhiều tin?"}
           subtitle={
             salary
               ? "Khoảng lương 5 triệu VND/tháng"
@@ -305,27 +328,27 @@ function Analysis({ salary = false }: { salary?: boolean }) {
           </Status>
         </Panel>
         <Panel
-          title={salary ? "Lương theo ngành" : "Nhu cầu theo kinh nghiệm"}
+          title={salary ? "Lương trung vị khác nhau thế nào giữa các ngành?" : "Tin tuyển dụng phân bố theo kinh nghiệm thế nào?"}
           subtitle={
             salary
-              ? "Mức lương trung bình · triệu VND/tháng"
-              : "Kinh nghiệm theo số năm"
+              ? "Trung vị · triệu VND/tháng; biểu đồ chỉ hiện nhóm từ 30 nhãn lương"
+              : "Theo số năm khai báo; thiếu kinh nghiệm được giữ riêng"
           }
         >
           <Status query={b}>
-            <Chart
+            {salary && b.data?.data?.length > 0 && b.data.data.every((r: Row) => r.salary_sample_size < 30) ? <div className="empty">Chưa có ngành đủ 30 nhãn lương để vẽ biểu đồ so sánh. Xem cỡ mẫu và trung vị mô tả trong bảng.</div> : <Chart
               labels={(b.data?.data || []).map((r: Row) =>
-                salary ? r.industry : String(r.experience_years),
+                salary ? r.industry : r.experience_years == null ? "Chưa rõ" : String(r.experience_years),
               )}
               values={(b.data?.data || []).map((r: Row) =>
                 salary
-                  ? r.mean_salary_vnd == null
+                  ? r.median_salary_vnd == null || r.salary_sample_size < 30
                     ? null
-                    : r.mean_salary_vnd / 1000000
+                    : r.median_salary_vnd / 1000000
                   : r.jobs,
               )}
               color="#73a6b7"
-            />
+            />}
           </Status>
         </Panel>
       </div>
@@ -346,7 +369,7 @@ function Analysis({ salary = false }: { salary?: boolean }) {
           </Status>
         </Panel>
       )}
-      <Panel title={salary ? "So sánh lương theo ngành" : "Kỹ năng và nhu cầu"}>
+      <Panel title={salary ? "So sánh lương công bố theo ngành" : "Kinh nghiệm liên hệ với lương công bố thế nào?"} subtitle="VND/tháng · trung vị mô tả mẫu quan sát; phân vị nhóm chỉ hiện từ 30 nhãn lương. Không xếp hạng từ nhóm ít mẫu.">
         <Status query={b}>
           <Table
             rows={b.data?.data || []}
@@ -354,7 +377,7 @@ function Analysis({ salary = false }: { salary?: boolean }) {
               {
                 name: salary ? "Ngành" : "Kinh nghiệm",
                 render: (r) =>
-                  salary ? r.industry : r.experience_years + " năm",
+                  salary ? r.industry : r.experience_years == null ? "Chưa rõ" : r.experience_years + " năm",
               },
               { name: "Số tin", render: (r) => r.jobs },
               { name: "Mẫu lương", render: (r) => r.salary_sample_size },
@@ -362,6 +385,9 @@ function Analysis({ salary = false }: { salary?: boolean }) {
                 name: "Lương trung bình",
                 render: (r) => money(r.mean_salary_vnd),
               },
+              { name: "Trung vị", render: (r) => money(r.median_salary_vnd) },
+              { name: "P25 / P75", render: (r) => `${money(r.p25)} / ${money(r.p75)}` },
+              { name: "Diễn giải", render: (r) => r.salary_sample_size < 30 ? "Ít mẫu lương (<30)" : "Mô tả mẫu quan sát" },
             ]}
           />
         </Status>
@@ -416,7 +442,7 @@ function JobList() {
               { name: "Địa phương", render: (r) => r.province },
               {
                 name: "Kinh nghiệm",
-                render: (r) => r.experience_years + " năm",
+                render: (r) => r.experience_years == null ? "Chưa rõ" : r.experience_years + " năm",
               },
               { name: "Lương / tháng", render: (r) => money(r.salary_mid_vnd) },
             ]}
@@ -480,6 +506,7 @@ function Datasets() {
     [demo, setDemo] = useState(true),
     [notice, setNotice] = useState(""),
     [quality, setQuality] = useState<Row | null>(null);
+  const [sourceMetadata, setSourceMetadata] = useState<Record<string, string>>({});
   const upload = useMutation({
     mutationFn: async () => {
       if (!file) throw Error("Hãy chọn file dữ liệu.");
@@ -487,6 +514,10 @@ function Datasets() {
       data.append("file", file);
       data.append("source", source);
       data.append("is_demo", String(demo));
+      data.append("source_metadata", JSON.stringify({
+        source_type: demo ? "synthetic" : "upload",
+        ...Object.fromEntries(Object.entries(sourceMetadata).filter(([, value]) => value.trim())),
+      }));
       return api("/datasets/upload", {
         method: "POST",
         body: data,
@@ -524,6 +555,12 @@ function Datasets() {
             để truy vết.
           </p>
           <div className="upload-fields">
+            {[
+              ["license_permission", "Giấy phép / quyền sử dụng (nếu có)", "text"],
+              ["collected_at", "Ngày thu thập (nếu biết)", "date"],
+              ["observation_from", "Bắt đầu quan sát (nếu biết)", "date"],
+              ["observation_to", "Kết thúc quan sát (nếu biết)", "date"],
+            ].map(([key, label, type]) => <label key={key}>{label}<input type={type} aria-label={label} value={sourceMetadata[key] || ""} onChange={(e) => setSourceMetadata({ ...sourceMetadata, [key]: e.target.value })} /></label>)}
             <input
               type="file"
               aria-label="Chọn dataset"
@@ -834,6 +871,8 @@ function Models() {
                 name: "Test R²",
                 render: (r) => r.test_metrics.r2?.toFixed(3) ?? "—",
               },
+              { name: "Test MedAE (VND)", render: (r) => money(r.test_metrics.median_absolute_error) },
+              { name: "Nhóm thí nghiệm", render: (r) => r.algorithm === "spark_linear_numeric" ? "Spark · kinh nghiệm quan sát được" : "Local · cùng sample/split/features" },
               {
                 name: "Trạng thái",
                 render: (r) =>
@@ -943,6 +982,7 @@ function Predictions() {
   }
   return (
     <>
+      <p className="muted">Các đầu vào mô tả công việc, kinh nghiệm và kỹ năng. Kết quả ước lượng lương công bố từ dữ liệu huấn luyện, không bảo đảm lương ứng viên nhận được; MAE là sai số trên holdout, không phải khoảng dự đoán cho từng người.</p>
       <div className="prediction-grid">
         <Panel
           title="Thông tin công việc"
@@ -1001,6 +1041,7 @@ function Predictions() {
               <div className="data-foot">
                 Model <ShortId id={result.model_version} /> · Test MAE{" "}
                 {money(result.model_metrics.mae)}
+                <br />Dataset <ShortId id={result.dataset_version} />
               </div>
               {result.reference_period?.from && (
                 <small className="muted">
@@ -1018,7 +1059,18 @@ function Predictions() {
                 <div key={w} className="demo-notice">
                   {w === "DEMO_MODEL_NOT_MARKET_ESTIMATE"
                     ? "DEMO: mô hình học từ dữ liệu tổng hợp, không dùng như ước lượng thị trường thực."
-                    : w}
+                    : ({
+                        UNSEEN_JOB_TITLE: "Chức danh chưa xuất hiện trong dữ liệu huấn luyện.",
+                        UNSEEN_INDUSTRY: "Ngành nghề chưa xuất hiện trong dữ liệu huấn luyện.",
+                        UNSEEN_PROVINCE: "Địa phương chưa xuất hiện trong dữ liệu huấn luyện.",
+                        UNSEEN_SENIORITY_LEVEL: "Cấp bậc chưa xuất hiện trong dữ liệu huấn luyện.",
+                        UNSEEN_EDUCATION_LEVEL: "Trình độ chưa xuất hiện trong dữ liệu huấn luyện.",
+                        UNSEEN_EMPLOYMENT_TYPE: "Loại hình công việc chưa xuất hiện trong dữ liệu huấn luyện.",
+                        UNSEEN_REMOTE_TYPE: "Hình thức làm việc chưa xuất hiện trong dữ liệu huấn luyện.",
+                        EXPERIENCE_OUTSIDE_TRAINING_RANGE: "Kinh nghiệm nằm ngoài khoảng quan sát khi huấn luyện; cần thận trọng khi diễn giải.",
+                        NO_OBSERVED_TRAINING_EXPERIENCE: "Tập huấn luyện chưa có kinh nghiệm quan sát được để đối chiếu đầu vào này.",
+                        ACTIVE_ARTIFACT_FAILED_USING_PREVIOUS_MODEL: "Mô hình hiện hành không khả dụng; kết quả dùng phiên bản trước đã kiểm tra.",
+                      } as Record<string, string>)[w] || w}
                 </div>
               ))}
               <small className="muted">

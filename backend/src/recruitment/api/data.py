@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from datetime import date
+from typing import Literal
 from recruitment.api.auth import admin, current_user
 from recruitment.adapters.mongo import database
 from recruitment.adapters.jobs import MongoJobs
@@ -22,10 +24,31 @@ def page_result(collection, query, page, size):
     return {'data': list(cursor), 'meta': {'page': page, 'page_size': size, 'total': database()[collection].count_documents(query)}}
 
 
+class SourceMetadata(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    source_type: Literal['upload', 'offline', 'api', 'synthetic'] | None = None
+    collected_at: date | None = None
+    observation_from: date | None = None
+    observation_to: date | None = None
+    license_permission: str | None = Field(None, max_length=1000)
+
+    @model_validator(mode='after')
+    def ordered_period(self):
+        if self.observation_from and self.observation_to and self.observation_from > self.observation_to:
+            raise ValueError('Observation period must be ordered')
+        return self
+
+
 @router.post('/datasets/upload', status_code=202)
 async def upload(file: UploadFile = File(), source: str = Form(min_length=1, max_length=100),
-                 is_demo: bool = Form(True), idempotency_key: str = Header(default=''), user=Depends(admin)):
-    return {'data': await DatasetService(database()).upload(file, source, is_demo, idempotency_key, user['_id'])}
+                 is_demo: bool = Form(True), idempotency_key: str = Header(default=''),
+                 source_metadata: str = Form('{}', max_length=8000,
+                     description='Optional JSON: source_type, collected_at, observation_from, observation_to (YYYY-MM-DD), license_permission.'), user=Depends(admin)):
+    try:
+        metadata = SourceMetadata.model_validate_json(source_metadata).model_dump(mode='json', exclude_none=True)
+    except ValueError:
+        raise AppError('VALIDATION_ERROR', 'Metadata nguồn không hợp lệ: kiểm tra JSON, ngày và quyền sử dụng.', 422)
+    return {'data': await DatasetService(database()).upload(file, source, is_demo, idempotency_key, user['_id'], metadata)}
 
 
 @router.get('/datasets')

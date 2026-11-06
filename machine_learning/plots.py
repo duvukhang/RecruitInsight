@@ -5,7 +5,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def diagnostics(directory,pipeline,predictions):
+def diagnostics(directory,pipeline,predictions,named_weights=None):
     actual=np.array([p['actual'] for p in predictions])/1e6
     predicted=np.array([p['predicted'] for p in predictions])/1e6
     fig,ax=plt.subplots(figsize=(6,4),layout='constrained')
@@ -17,10 +17,12 @@ def diagnostics(directory,pipeline,predictions):
     fig,ax=plt.subplots(figsize=(6,4),layout='constrained');ax.hist(actual-predicted,bins=25,color='#2563eb',alpha=.8)
     ax.set(xlabel='Actual - predicted (million VND/month)',ylabel='Records',title='Holdout residual distribution')
     fig.savefig(directory/'residuals.png',dpi=160);plt.close(fig)
-    model=pipeline['model'];weights=getattr(model,'feature_importances_',getattr(model,'coef_',None))
+    model=pipeline['model'] if pipeline is not None else None
+    weights=np.array([v for _,v in named_weights]) if named_weights is not None else getattr(model,'feature_importances_',getattr(model,'coef_',None))
     importance=[]
     if weights is not None:
-        names=pipeline['features'].get_feature_names_out();indices=np.argsort(np.abs(weights))[-15:]
+        names=np.array([name for name,_ in named_weights]) if named_weights is not None else pipeline['features'].get_feature_names_out()
+        indices=np.argsort(np.abs(weights))[-15:]
         importance=[{'feature':str(names[i]),'value':float(weights[i])} for i in indices[::-1]]
         fig,ax=plt.subplots(figsize=(8,5),layout='constrained');ax.barh([names[i] for i in indices],[abs(float(weights[i])) for i in indices],color='#73a6b7')
         ax.set(title='Feature importance / absolute coefficient',xlabel='Importance (model dependent)')

@@ -43,9 +43,14 @@ def predict(db,body,user_id):
     if not math.isfinite(value) or value<=0:
         raise AppError('INVALID_PREDICTION','Model không trả mức lương hợp lệ cho dữ liệu này.',503)
     warnings=['ACTIVE_ARTIFACT_FAILED_USING_PREVIOUS_MODEL'] if fallback else []
-    if model['feature_schema_version']=='dict-v1' and body['job_title'].lower() not in model.get('known_titles',[]):warnings.append('UNSEEN_JOB_TITLE')
+    if model['feature_schema_version'].startswith('dict-') and body['job_title'].lower() not in model.get('known_titles',[]):warnings.append('UNSEEN_JOB_TITLE')
+    for column,known in model.get('known_categories',{}).items():
+        if str(body.get(column) or 'Unknown').strip().lower() not in known:
+            warnings.append('UNSEEN_'+column.upper())
+    warnings=list(dict.fromkeys(warnings))
     lower,upper=model.get('experience_range',[0,60])
-    if not lower<=body['experience_years']<=upper:warnings.append('EXPERIENCE_OUTSIDE_TRAINING_RANGE')
+    if lower is None or upper is None:warnings.append('NO_OBSERVED_TRAINING_EXPERIENCE')
+    elif not lower<=body['experience_years']<=upper:warnings.append('EXPERIENCE_OUTSIDE_TRAINING_RANGE')
     if model['is_demo']:warnings.append('DEMO_MODEL_NOT_MARKET_ESTIMATE')
     reference=model.get('reference_period')
     if reference is None:

@@ -1,8 +1,8 @@
 """Measure the same Spark normalization/window workload at different scales."""
 import argparse,csv,hashlib,json,os,platform,statistics,time
 from pathlib import Path
-from pyspark.sql import functions as F,Window
-from bigdata.etl import transform
+from pyspark.sql import functions as F
+from bigdata.etl import transform, classified_output, SCHEMA
 from bigdata.spark_session import spark_session
 from bigdata.ingestion import input_records
 from recruitment.adapters.mongo import database
@@ -16,8 +16,14 @@ def run(sizes=(100,10000,100000),repeats=3):
     run_id=uid();root=settings().data_root/'artifacts'/'evidence'/run_id;root.mkdir(parents=True)
     environment={'python':platform.python_version(),'platform':platform.platform(),'visible_cpus':os.cpu_count(),
         'seed':42,'cache':'OS cache uncontrolled; no Spark persist; warm-up excluded',
-        'workload':'read JSONL + normalize UDF + deterministic dedup window + aggregate counts/checksum; excludes Mongo write and startup',
-        'source_sha256':hashlib.sha256(Path('/app/bigdata/etl.py').read_bytes()+Path('/app/bigdata/normalize.py').read_bytes()).hexdigest()}
+        'workload':'read JSONL + normalize UDF + production ETL classification + union outcomes + aggregate counts/checksum; excludes input generation, Mongo writes, startup, task metadata inspection',
+        'source_sha256':hashlib.sha256(Path(__file__).read_bytes()+Path(__file__).with_name('etl.py').read_bytes()+Path(__file__).with_name('normalize.py').read_bytes()).hexdigest(),
+        'checksum':'sum xxhash64 over all normalized schema fields per terminal outcome; non-cryptographic',
+        'benchmark_schema_version':2}
+    from recruitment.domain import salary as salary_module
+    source_paths=[Path(__file__),Path(__file__).with_name('etl.py'),Path(__file__).with_name('normalize.py'),
+        Path(__file__).with_name('spark_session.py'),Path(salary_module.__file__)]
+    environment['source_hashes']={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}
     db=database();db.benchmark_runs.insert_one({'_id':run_id,'status':'RUNNING','environment':environment,'created_at':now()})
     files={}
     for size in sizes:
@@ -27,35 +33,45 @@ def run(sizes=(100,10000,100000),repeats=3):
             for i,record in enumerate(input_records(source),1):
                 output.write(json.dumps({'record_number':i,'raw_record_ref':str(i),'payload_json':json.dumps(record,ensure_ascii=False)},ensure_ascii=False)+'\n')
         files[size]=str(path)
+    environment['input_hashes']={str(size):hashlib.sha256(Path(path).read_bytes()).hexdigest() for size,path in files.items()}
     observations=[];fingerprints={}
-    original_master=os.environ.get('SPARK_MASTER','spark://spark-master:7077')
+    original_master=os.environ.get('SPARK_MASTER')
+    original_cores=os.environ.get('SPARK_MAX_CORES')
     try:
-        for configuration,master,cores in [('local1','local[1]',1),('cluster1',original_master,1),('cluster2',original_master,2)]:
+        for configuration,master,cores in [('local1','local[1]',1),('cluster1',original_master or 'spark://spark-master:7077',1),('cluster2',original_master or 'spark://spark-master:7077',2)]:
             os.environ['SPARK_MASTER']=master;os.environ['SPARK_MAX_CORES']=str(cores);settings.cache_clear()
             spark=spark_session('benchmark-'+configuration+'-'+run_id)
             environment['spark']=spark.version
             try:
                 for size in sizes:
                     for repetition in range(repeats+1):
+                        group=f'{configuration}-{size}-{repetition}'
+                        spark.sparkContext.setJobGroup(group,'Production ETL benchmark',interruptOnCancel=True)
                         started=time.perf_counter()
-                        raw,_,_,_=transform(spark,files[size],'DEMO_BENCHMARK')
-                        window=Window.partitionBy('source_job_key').orderBy(F.col('error_code').isNotNull().cast('int'),'record_number','raw_record_ref')
-                        classified=raw.withColumn('rank',F.row_number().over(window)).withColumn('outcome',
-                            F.when(F.col('error_code').isNotNull(),'invalid').when(F.col('rank')>1,'duplicate').otherwise('clean'))
+                        _,clean,duplicates,invalid=transform(spark,files[size],'DEMO_BENCHMARK')
+                        classified=classified_output(clean,duplicates,invalid)
                         result=classified.groupBy('outcome').agg(F.count('*').alias('count'),
-                            F.sum(F.xxhash64('source_job_key','job_title','salary_mid_vnd','raw_record_ref')).alias('checksum')).collect()
+                            F.sum(F.xxhash64(*SCHEMA.fieldNames())).alias('checksum')).collect()
                         elapsed=time.perf_counter()-started
                         fingerprint=sorted((r['outcome'],r['count'],r['checksum']) for r in result)
-                        assert sum(r['count'] for r in result)==size
-                        if size in fingerprints:assert fingerprint==fingerprints[size],'Outputs differ between configurations'
+                        if sum(r['count'] for r in result)!=size:raise RuntimeError('ETL output count does not reconcile')
+                        if size in fingerprints:
+                            if fingerprint!=fingerprints[size]:raise RuntimeError('Outputs differ between configurations')
                         else:fingerprints[size]=fingerprint
                         if repetition==0:continue
                         observed_executors=spark.sparkContext._jsc.sc().getExecutorMemoryStatus().size()-1
                         if configuration.startswith('cluster') and observed_executors!=cores:
                             raise RuntimeError(f'Expected {cores} executors, observed {observed_executors}. Stop streaming/other Spark jobs before measuring.')
+                        tracker=spark.sparkContext.statusTracker()
+                        job_ids=tracker.getJobIdsForGroup(group)
+                        stage_ids=sorted({int(stage) for jid in job_ids if (info:=tracker.getJobInfo(jid)) for stage in info.stageIds})
+                        stages=[{'stage_id':sid,'tasks':info.numTasks} for sid in stage_ids if (info:=tracker.getStageInfo(sid))]
                         observation={'configuration':configuration,'rows':size,'repetition':repetition,'elapsed_seconds':elapsed,
                             'rows_per_second':size/elapsed,'spark_application_id':spark.sparkContext.applicationId,
-                            'executors':observed_executors,'fingerprint':fingerprint}
+                            'executors':observed_executors,'fingerprint':fingerprint,
+                            'job_ids':list(map(int,job_ids)),'stages':stages,'scheduled_tasks':sum(s['tasks'] for s in stages),
+                            'output_partitions':classified.rdd.getNumPartitions(),
+                            'task_count_scope':'Spark status tracker retained stages; inspect event logs for retries/speculative attempts'}
                         observations.append(observation)
                         db.benchmark_runs.update_one({'_id':run_id},{'$push':{'observations':observation}})
                         print(json.dumps({k:v for k,v in observation.items() if k!='fingerprint'}),flush=True)
@@ -78,7 +94,10 @@ def run(sizes=(100,10000,100000),repeats=3):
     except Exception:
         db.benchmark_runs.update_one({'_id':run_id},{'$set':{'status':'FAILED','finished_at':now()}});raise
     finally:
-        os.environ['SPARK_MASTER']=original_master;os.environ['SPARK_MAX_CORES']='2';settings.cache_clear()
+        for key,value in [('SPARK_MASTER',original_master),('SPARK_MAX_CORES',original_cores)]:
+            if value is None:os.environ.pop(key,None)
+            else:os.environ[key]=value
+        settings.cache_clear()
 
 
 if __name__=='__main__':

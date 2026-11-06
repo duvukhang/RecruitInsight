@@ -14,6 +14,13 @@ export function ModelDiagnostics({ id }: { id: string }) {
     queryFn: () => api("/models/" + id + "/diagnostics"),
   });
   const data = query.data?.data;
+  if (query.isPending) return <p className="muted">Đang tải đánh giá mô hình…</p>;
+  if (query.error) return <p role="alert" className="error">{query.error.message} <button onClick={() => query.refetch()}>Thử lại</button></p>;
+  const residuals = (data?.holdout || []).map((r: any) => (r.actual - r.predicted) / 1e6);
+  const lower = residuals.length ? Math.min(...residuals) : 0;
+  const width = residuals.length ? Math.max((Math.max(...residuals) - lower) / 20, 0.01) : 1;
+  const bins = Array(20).fill(0);
+  residuals.forEach((value: number) => bins[Math.min(19, Math.floor((value - lower) / width))]++);
   return (
     <div className="quality-records">
       <div className="actions">
@@ -57,11 +64,25 @@ export function ModelDiagnostics({ id }: { id: string }) {
               r.predicted / 1e6,
             ])}
           />
+          <p className="muted">Hiển thị {data.holdout.length} mẫu đầu tiên (tối đa 1.000); tải artifact để xem toàn bộ holdout. Đơn vị: triệu VND/tháng.</p>
+          <h3>Phân bố sai số actual − predicted</h3>
+          <Chart labels={bins.map((_, i) => (lower + i * width).toFixed(2))} values={bins} />
           <h3>Feature importance / |coefficient| (phụ thuộc model)</h3>
+          <p className="muted">Đây là trọng số của mô hình đã học, không chứng minh quan hệ nhân quả; không so trực tiếp trị số giữa các thuật toán.</p>
           <Chart
             labels={data.importance.map((r: any) => r.feature)}
             values={data.importance.map((r: any) => Math.abs(r.value))}
           />
+          <h3>Sai số theo nhóm trên holdout (VND/tháng)</h3>
+          {data.slice_metrics?.length ? <div className="table-scroll"><table>
+            <thead><tr><th>Chiều</th><th>Nhóm</th><th>N</th><th>MAE</th><th>RMSE</th><th>MedAE</th></tr></thead>
+            <tbody>{data.slice_metrics.map((r: any, i: number) => <tr key={i}>
+              <td>{r.dimension || "province"}</td><td>{r.group || r.province}</td><td>{r.n}</td>
+              <td>{Math.round(r.metrics.mae).toLocaleString("vi-VN")}</td>
+              <td>{Math.round(r.metrics.rmse).toLocaleString("vi-VN")}</td>
+              <td>{Math.round(r.metrics.median_absolute_error).toLocaleString("vi-VN")}</td>
+            </tr>)}</tbody>
+          </table></div> : <p className="muted">Chưa có nhóm đủ 30 mẫu hoặc model cũ chưa lưu phân tích nhóm. Không suy ra sai số bằng 0.</p>}
         </>
       ) : (
         <p className="muted">

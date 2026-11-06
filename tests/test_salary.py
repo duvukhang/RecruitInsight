@@ -44,3 +44,24 @@ def test_invalid_currency_type_is_quarantined_instead_of_crashing_spark():
     record=normalize(json.dumps({'job_title':'Engineer','company_name':'A','salary':'1000','salary_currency':{'unexpected':'object'}}),'raw-1',1,'TEST')
     assert record['error_code']=='INVALID_SALARY_FIELDS'
     assert record['salary_mid_vnd'] is None
+
+
+@pytest.mark.parametrize('value', [None, '', '   '])
+def test_missing_experience_remains_unknown(value):
+    record=normalize(json.dumps({'job_title':'Engineer','company_name':'A','experience_years':value}),'r',1,'TEST')
+    assert record['experience_years'] is None
+    assert record['error_code'] is None
+
+
+@pytest.mark.parametrize('value', [-1, 61, 'nan', 'infinity', 'not a number', True])
+def test_invalid_experience_is_quarantined(value):
+    record=normalize(json.dumps({'job_title':'Engineer','company_name':'A','experience_years':value}),'r',1,'TEST')
+    assert record['experience_years'] is None
+    assert record['error_code']=='INVALID_EXPERIENCE'
+
+
+def test_zero_experience_and_unsupported_pay_period():
+    record=normalize(json.dumps({'job_title':'Engineer','company_name':'A','experience_years':0}),'r',1,'TEST')
+    assert record['experience_years']==0
+    assert salary('10 triệu',period='WEEK')['salary_quality_status']=='UNSUPPORTED_PERIOD'
+    assert salary('10 triệu',period='WEEK')['salary_mid_vnd'] is None

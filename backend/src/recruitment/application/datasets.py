@@ -10,7 +10,8 @@ class DatasetService:
     def __init__(self, db):
         self.db = db
 
-    async def upload(self, file, source, is_demo, key, actor):
+    async def upload(self, file, source, is_demo, key, actor, source_metadata=None):
+        source_metadata = source_metadata or {}
         if not key or len(key) > 128:
             raise AppError('VALIDATION_ERROR', 'Cần Idempotency-Key (1–128 ký tự).', 422)
         suffix = Path(file.filename or '').suffix.lower()
@@ -37,19 +38,21 @@ class DatasetService:
             previous = self.db.datasets.find_one({'created_by': actor, 'idempotency_key': key})
             if previous:
                 path.unlink(missing_ok=True)
-                if (previous['content_hash'], previous['source'], previous['is_demo']) != (sha, source, is_demo):
+                if (previous['content_hash'], previous['source'], previous['is_demo'], previous.get('source_metadata', {})) != (sha, source, is_demo, source_metadata):
                     raise AppError('IDEMPOTENCY_CONFLICT', 'Key đã được dùng cho nội dung khác.', 409)
                 return self.ensure_ingestion(previous)
             dataset = {'_id': version, 'dataset_id': version, 'created_by': actor,
                 'idempotency_key': key, 'status': 'IMPORTING', 'source': source,
                 'is_demo': is_demo, 'content_hash': sha, 'file_ref': str(path),
-                'created_at': now(), 'format': suffix[1:], 'row_counts': {}}
+                'created_at': now(), 'format': suffix[1:], 'row_counts': {},
+                'original_filename': Path(file.filename or '').name, 'schema_version': 1,
+                'source_metadata': source_metadata}
             try:
                 self.db.datasets.insert_one(dataset)
             except DuplicateKeyError:
                 path.unlink(missing_ok=True)
                 previous = self.db.datasets.find_one({'created_by': actor, 'idempotency_key': key})
-                if previous['content_hash'] != sha:
+                if (previous['content_hash'], previous['source'], previous['is_demo'], previous.get('source_metadata', {})) != (sha, source, is_demo, source_metadata):
                     raise AppError('IDEMPOTENCY_CONFLICT', 'Key đã được sử dụng.', 409)
                 return self.ensure_ingestion(previous)
             return self.ensure_ingestion(dataset)

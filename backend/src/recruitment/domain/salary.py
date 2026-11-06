@@ -27,6 +27,9 @@ def salary(text, currency=None, period=None, normalization=None):
         'salary_normalization_assumptions': []}
     if not value or any(x in value for x in ['negotiable', 'competitive', 'thỏa thuận', 'thoả thuận', 'không công khai']):
         return result
+    if period not in (None, 'MONTH', 'YEAR', 'HOUR', 'DAY') or re.search(r'/tuần|/week|\bweekly\b', value):
+        result['salary_quality_status'] = 'UNSUPPORTED_PERIOD'
+        return result
     if re.match(r'^-\s*\d', value):
         result['salary_quality_status']='INVALID_VALUE';return result
     currency = (currency or ('USD' if 'usd' in value or '$' in value else 'VND' if re.search(r'vnd|triệu|trieu|\bđ\b', value) else '')).upper()

@@ -30,6 +30,10 @@ def test_raw_retention_and_idempotency(suffix, content, count):
         with pytest.raises(AppError) as error:
             asyncio.run(upload(content+' '))
         assert error.value.status==409
+        with pytest.raises(AppError) as error:
+            asyncio.run(service.upload(UploadFile(io.BytesIO(content.encode()),filename='input'+suffix),
+                'TEST',True,key,actor,{'license_permission':'different permission'}))
+        assert error.value.code=='IDEMPOTENCY_CONFLICT'
         job=db.etl_jobs.find_one({'_id':first['job_id']});job['attempt_id']=uid()
         ingest(db,job,lambda:None)
         ingest(db,job,lambda:None)

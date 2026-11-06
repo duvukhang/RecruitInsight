@@ -49,7 +49,10 @@ def diagnostics(identifier:str,user=Depends(analyst)):
         target=directory/name
         return json.loads(target.read_text(encoding='utf-8')) if target.is_file() else []
     names={'actual':'actual-vs-predicted.png','residuals':'residuals.png','importance':'importance.png','holdout':'holdout.json','split':'split.json'}
+    experiment=database().ml_experiments.find_one({'_id':identifier}) or {}
     return {'data':{'holdout':read('holdout.json')[:1000],'importance':read('importance.json'),
+                    'slice_metrics':[r for r in experiment.get('slice_metrics',[]) if r.get('n',0)>=30],
+                    'slice_policy':experiment.get('slice_policy',{'minimum_samples':30}),
                     'available_artifacts':[key for key,name in names.items() if (directory/name).is_file()]}}
 
 

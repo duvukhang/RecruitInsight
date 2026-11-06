@@ -4,6 +4,7 @@ from functools import partial
 from pyspark.sql import functions as F, Window
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, BooleanType, ArrayType
 from bigdata.normalize import normalize
+from bigdata.quality import quality_metrics
 from bigdata.spark_session import spark_session
 from recruitment.adapters.mongo import database
 from recruitment.domain.common import now, AppError
@@ -52,17 +53,30 @@ def write_partition(rows, collection, version, attempt, mongo_config):
     connection.close()
 
 
+def classified_output(clean, duplicates, invalid):
+    columns=SCHEMA.fieldNames()
+    return (clean.select(*columns).withColumn('outcome',F.lit('clean'))
+        .unionByName(duplicates.select(*columns).withColumn('outcome',F.lit('duplicate')))
+        .unionByName(invalid.select(*columns).withColumn('outcome',F.lit('invalid'))))
+
+
 def aggregate(clean):
     summary=clean.agg(F.count('*').alias('total_jobs'), F.countDistinct('company_key').alias('total_companies'),
-        F.countDistinct('industry').alias('total_industries'),F.count('salary_mid_vnd').alias('salary_sample_size'),
+        F.countDistinct(F.when(F.col('industry')!='Unknown',F.col('industry'))).alias('total_industries'),
+        F.countDistinct(F.when(F.col('province')!='Unknown',F.col('province'))).alias('total_provinces'),
+        F.min('posted_at').alias('posted_from'),F.max('posted_at').alias('posted_to'),
+        F.count('salary_mid_vnd').alias('salary_sample_size'),
         F.avg('salary_mid_vnd').alias('mean_salary_vnd'),
         F.percentile_approx('salary_mid_vnd',[.25,.5,.75,.9],10000).alias('percentiles')).first().asDict()
     percentiles=summary.pop('percentiles') or [None]*4
     summary.update(dict(zip(['p25','median_salary_vnd','p75','p90'],percentiles)))
     def groups(column):
-        return [r.asDict() for r in clean.groupBy(column).agg(F.count('*').alias('jobs'),
-            F.count('salary_mid_vnd').alias('salary_sample_size'),F.avg('salary_mid_vnd').alias('mean_salary_vnd'))
-            .orderBy(F.desc('jobs')).limit(100).collect()]
+        rows = [r.asDict() for r in clean.groupBy(column).agg(F.count('*').alias('jobs'),
+            F.count('salary_mid_vnd').alias('salary_sample_size'),F.avg('salary_mid_vnd').alias('mean_salary_vnd'),
+            F.percentile_approx('salary_mid_vnd',[.25,.5,.75,.9],10000).alias('percentiles'))
+            .orderBy(F.desc('jobs'),F.asc_nulls_last(column)).limit(100).collect()]
+        from recruitment.application.analytics import describe_groups
+        return describe_groups(rows)
     skills=[r.asDict() for r in clean.select(F.explode('required_skills').alias('skill')).groupBy('skill').count().orderBy(F.desc('count')).limit(30).collect()]
     trends=[r.asDict() for r in clean.filter(F.col('posted_at').isNotNull()).withColumn('month',F.substring('posted_at',1,7)).groupBy('month').count().orderBy('month').limit(120).collect()]
     hist=[r.asDict() for r in clean.filter(F.col('salary_mid_vnd').isNotNull()).withColumn('lower_vnd',F.floor(F.col('salary_mid_vnd')/5000000)*5000000).groupBy('lower_vnd').count().orderBy('lower_vnd').limit(100).collect()]
@@ -88,33 +102,38 @@ def etl(db,job,guard):
         all_rows,clean,duplicates,invalid=transform(spark,dataset['raw_file_ref'],dataset['source'],normalization)
         frames=[all_rows.cache(),clean.cache(),duplicates.cache(),invalid.cache()]
         counts=dict(zip(['raw','clean','duplicate','invalid'],[frame.count() for frame in frames]))
-        assert counts['raw']==counts['clean']+counts['invalid']+counts['duplicate']
+        if counts['raw'] != counts['clean']+counts['invalid']+counts['duplicate']:
+            raise AppError('ETL_RECONCILIATION_FAILED','Số bản ghi raw không khớp phân loại.',500)
         for frame,collection in [(clean,'cleaned_jobs'),(invalid,'invalid_jobs'),(duplicates,'duplicate_jobs')]:
             s=settings()
             mongo_config={'host':s.mongo_host,'username':s.mongo_user,'password':s.mongo_password.get_secret_value(),
                           'authSource':s.mongo_database,'serverSelectionTimeoutMS':5000}
             guard();frame.foreachPartition(partial(write_partition,collection=collection,version=version,attempt=attempt,mongo_config=mongo_config))
         valid_rate=(counts['raw']-counts['invalid'])/counts['raw'] if counts['raw'] else 0
-        usable=clean.filter(F.col('salary_mid_vnd').isNotNull()).count()
+        usable=clean.filter(F.col('salary_mid_vnd')>0).count()
         threshold=normalization.get('validity_min',.9)
+        fields=['job_title','company_name','source','province','industry','experience_years','posted_at','salary_mid_vnd']
+        missing=all_rows.agg(*[F.sum(F.when(F.col(c).isNull() | F.trim(F.col(c).cast('string')).isin('', 'Unknown'),1).otherwise(0)).alias(c) for c in fields]).first().asDict()
+        missing={k:int(v or 0) for k,v in missing.items()}
+        salary_consistent=F.col('salary_mid_vnd').isNull() | ((F.col('salary_min_vnd')>0) & (F.col('salary_max_vnd')>=F.col('salary_min_vnd')) &
+            (F.abs(F.col('salary_mid_vnd')-(F.col('salary_min_vnd')+F.col('salary_max_vnd'))/2)<1))
+        rules=(F.length('job_title')>0) & (F.length('company_name')>0) & (F.col('experience_years').isNull() | F.col('experience_years').between(0,60)) & salary_consistent
+        consistent=clean.filter(rules).count()
+        eligible=clean.filter((F.col('salary_mid_vnd')>0) & (F.col('salary_basis')!='NET')).count()
+        recent=clean.filter(F.to_timestamp('posted_at').between(F.current_timestamp()-F.expr('INTERVAL 180 DAYS'),F.current_timestamp())).count()
         report={'_id':attempt,'dataset_version':version,'attempt_id':attempt,'counts':counts,
-            'validity':valid_rate,'uniqueness':counts['clean']/(counts['raw']-counts['invalid']) if counts['raw']>counts['invalid'] else None,
-            'salary_label_usability':usable/counts['clean'] if counts['clean'] else None,
+            **quality_metrics(counts,missing,consistent,usable,eligible,recent),
             'thresholds':{'validity_min':threshold},'passed':valid_rate>=threshold and counts['clean']>0,'generated_at':now(),'normalization_config':normalization}
-        present=all_rows.select(sum(F.when(F.length(F.col(column))>0,1).otherwise(0) for column in ['job_title','company_name','source']).alias('present')).agg(F.sum('present')).first()[0] or 0
-        report['completeness']=present/(3*counts['raw']) if counts['raw'] else None
-        report['consistency']=1.0 if counts['clean'] else None
-        recent=clean.filter(F.to_timestamp('posted_at') >= F.current_timestamp()-F.expr('INTERVAL 180 DAYS')).count()
-        report['timeliness']=recent/counts['clean'] if counts['clean'] else None
         report['reasons']=[] if report['passed'] else ['VALIDITY_BELOW_THRESHOLD_OR_NO_CLEAN_RECORDS']
         db.data_quality_reports.replace_one({'_id':attempt},report,upsert=True)
         if not report['passed']:
             db.datasets.update_one({'_id':version,'active_attempt':attempt,'status':{'$ne':'PUBLISHED'}},{'$set':{'status':'FAILED'}})
-            raise AppError('QUALITY_GATE_FAILED','Chất lượng không đạt: validity phải ≥90% và có ít nhất một clean record.')
+            raise AppError('QUALITY_GATE_FAILED',f'Chất lượng không đạt: validity phải ≥{threshold:.0%} và có ít nhất một clean record.')
         analytics=aggregate(clean);guard()
         db.analytics_snapshots.replace_one({'_id':attempt},{'_id':attempt,'dataset_version':version,
             'attempt_id':attempt,'data':analytics,'sample_size':counts['clean'],'is_demo':dataset['is_demo'],
-            'method':'spark-sql-v1; percentile_approx accuracy=10000','updated_at':now()},upsert=True)
+            'analytics_schema_version':2,
+            'method':'spark-sql-v2; percentile_approx accuracy=10000','updated_at':now()},upsert=True)
         owned={'_id':job['_id'],'fencing_token':job['fencing_token'],'status':'RUNNING','cancel_requested':False,'lease_until':{'$gt':now()}}
         if not db.etl_jobs.update_one(owned,{'$set':{'status':'COMMITTING'}}).modified_count:
             guard();raise AppError('LEASE_LOST','Không còn quyền công bố.')
