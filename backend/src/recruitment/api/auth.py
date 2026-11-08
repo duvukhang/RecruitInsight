@@ -5,6 +5,7 @@ from recruitment.adapters.mongo import database
 from recruitment.application.auth import AuthService
 from recruitment.domain.common import AppError
 from recruitment.infrastructure.security import decode_access, token_hash
+from recruitment.domain.permissions import permits
 
 router = APIRouter(prefix='/api/v1/auth', tags=['Authentication'])
 bearer = HTTPBearer(auto_error=False)
@@ -21,19 +22,19 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
         raise AppError('UNAUTHENTICATED', 'Vui lòng đăng nhập.', 401)
     claims = decode_access(credentials.credentials)
     user = database().users.find_one({'_id': claims['sub'], 'enabled': True})
-    if not user:
+    if not user or claims.get('auth_version', 0) != user.get('auth_version', 0):
         raise AppError('UNAUTHENTICATED', 'Tài khoản không khả dụng.', 401)
     return user
 
 
 def admin(user=Depends(current_user)):
-    if user['role'] != 'ADMIN':
+    if not permits(user['role'], 'manage'):
         raise AppError('FORBIDDEN', 'Cần quyền quản trị.', 403)
     return user
 
 
 def analyst(user=Depends(current_user)):
-    if user['role'] not in ['ADMIN','ANALYST']:
+    if not permits(user['role'], 'predict'):
         raise AppError('FORBIDDEN','Cần quyền analyst hoặc admin.',403)
     return user
 
@@ -45,7 +46,7 @@ def cookies(response, raw, csrf, secure):
 
 @router.post('/login')
 def login(body: Login, request: Request, response: Response):
-    data, raw, csrf = AuthService(database()).login(body.username, body.password, request.client.host)
+    data, raw, csrf = AuthService(database()).login(body.username, body.password, request.client.host, request.headers.get('user-agent', '')[:256])
     cookies(response, raw, csrf, request.url.scheme == 'https')
     return {'data': data, 'csrf_token': csrf}
 
@@ -70,4 +71,5 @@ def logout(response: Response, refresh_token: str = Cookie(default=''), x_csrf_t
 
 @router.get('/me')
 def me(user=Depends(current_user)):
-    return {'data': {'id': user['_id'], 'username': user['username'], 'role': user['role']}}
+    from recruitment.application.profile import identity
+    return {'data': identity(user)}

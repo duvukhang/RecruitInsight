@@ -64,6 +64,17 @@ class AnalyticsService:
         return list(self.db.cleaned_jobs.aggregate([{'$match':self.match},*pipeline],maxTimeMS=5000))
 
     def metric(self,name):
+        if name == 'job-years':
+            data = self.snapshot['data'].get('years') if self.use_snapshot else None
+            if data is None:
+                observed_year = {'$ifNull': ['$posted_year', {'$convert': {'input': {'$substrCP': [{'$ifNull': ['$posted_at', '']}, 0, 4]},
+                    'to': 'int', 'onError': None, 'onNull': None}}]}
+                data = self.query([{'$group': {'_id': observed_year, 'count': {'$sum': 1}}},
+                    {'$match': {'_id': {'$ne': None}}}, {'$sort': {'_id': 1}}])
+                for row in data:
+                    row['posted_year'] = row.pop('_id')
+            return {'data': data, 'meta': {**self.metadata(), 'time_resolution': 'YEAR',
+                'warning': 'Only observed years; no inferred posting days or months.'}}
         mapping={'overview':'overview','salary-by-industry':'industries','salary-by-location':'locations',
                  'top-skills':'skills','job-trends':'trends','experience':'experience','companies':'companies','salary-distribution':'histogram'}
         if self.use_snapshot:

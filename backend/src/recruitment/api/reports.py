@@ -33,7 +33,8 @@ def export(version:str,kind:str,user=Depends(admin)):
                 for column in columns:
                     raw_value=dataset['is_demo'] if column=='is_demo' else record.get(column)
                     value=str(raw_value if raw_value is not None else '')
-                    values.append("'"+value if value[:1] in ['=','+','-','@'] else value)
+                    dangerous = value.lstrip().startswith(('=', '+', '-', '@')) or value.startswith(('\t', '\r', '\n'))
+                    values.append("'"+value if dangerous else value)
                 writer.writerow(values);yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
         finally:cursor.close()
     label='DEMO-' if dataset['is_demo'] else ''

@@ -2,6 +2,19 @@
 
 Recruitment Data Analytics and Job Salary Prediction System. React/FastAPI/MongoDB, Spark ETL và ML chạy ở worker riêng, triển khai bằng Docker Compose.
 
+## RecruitInsight 2.0
+
+Nhánh `feat/recruitinsight-real-data-rbac-ui` bổ sung quản lý người dùng/audit, thu hồi phiên, route guards/403, giao diện dark có CSS depth và reduced motion, quality theo phiên bản, so sánh nguồn và staged JSONL. Luồng ETL/ML, upload 50 MiB và dữ liệu hiện có được giữ.
+
+- [Audit/baseline](docs/reports/upgrade-audit.md), [test report và giới hạn](docs/reports/upgrade-results.md), [changelog](CHANGELOG.md).
+- [Adapter, quyền nguồn, snapshot và staged import](docs/real-data-import.md).
+- [Ma trận RBAC và vận hành quản trị](docs/admin-users.md).
+- [Kịch bản demo 2.0 và lệnh kiểm chứng](docs/demo-2.md).
+
+**Nguồn public hiện NEEDS_REVIEW**: đã kiểm dataset cards nhưng chưa xác minh đủ quyền với nội dung gốc. Không tự tải corpus hoặc ghi nhãn REAL_VERIFIED. Các demo/benchmark tạo trong phiên nâng cấp đều là dữ liệu tổng hợp, không phải quan sát thị trường hiện tại.
+
+Sau build/start theo hướng dẫn bên dưới, ADMIN mở **Người dùng**, **Nhật ký quản trị**, **Nguồn dữ liệu**, **Chất lượng dữ liệu** từ sidebar. ANALYST xem mô hình/dự đoán; VIEWER chỉ xem analytics/jobs. Không tạo mật khẩu demo hardcode.
+
 ## Bài toán và phạm vi nghiên cứu
 
 Hệ thống mô tả **các tin tuyển dụng trong tập dữ liệu quan sát**, ước lượng **midpoint lương công bố theo tháng VND** từ thông tin công việc và kiểm chứng workload Spark ở các quy mô xác định. Số tin không phải tổng nhu cầu lao động, lương công bố không phải bảo đảm lương thực nhận, và kết quả DEMO không đại diện cho Việt Nam.
@@ -27,7 +40,13 @@ Script tạo `.env` với secrets ngẫu nhiên nếu chưa có, build và start
 - Spark Master UI: http://localhost:8081
 - Đăng nhập bằng `ADMIN_USERNAME` và `ADMIN_PASSWORD` trong `.env` cục bộ. Không có mật khẩu mặc định; không commit `.env`.
 
-Dữ liệu hiện có là **DEMO tổng hợp, seed 42**, không đại diện thị trường lao động thực. Hệ thống cho phép upload dataset thật khi có quyền sử dụng.
+Dữ liệu mẫu là **DEMO tổng hợp**, không đại diện thị trường lao động thực. Generator cũ giữ seed 42; bộ DEMO mở rộng dùng seed 2026, 10 ngành, 240 doanh nghiệp giả lập và 8 địa phương. Hệ thống cho phép upload dataset thật khi có quyền sử dụng.
+
+**Hồ sơ cá nhân:** bấm avatar góc phải trên hoặc mở http://localhost:8080/profile để sửa thông tin, đổi mật khẩu và quản lý các phiên đăng nhập. Xem [hướng dẫn hồ sơ](docs/profile.md).
+
+**Giao diện sáng/tối:** bấm nút mặt trời/mặt trăng cạnh avatar (hoặc trên màn hình đăng nhập). Lựa chọn được lưu trên trình duyệt và đồng bộ giữa các tab; mặc định là chế độ tối.
+
+Để tạo và công bố DEMO mở rộng qua upload → ingestion → Spark ETL → training/activation thật (cần Docker đã chạy và `.env` có tài khoản ADMIN), chạy `python scripts/activate_expanded_demo.py`. Lệnh này chuyển dataset/model đang active sang bản DEMO mới, không xóa bản cũ; file CSV nằm trong `data/` đã được gitignore. Bộ 50.000 dòng tạo ra 49.046 tin sạch, 438 trùng, 516 không hợp lệ với seed mặc định. Đây là dữ liệu mô phỏng, không phải corpus public.
 
 ## Môi trường Python venv và cài thư viện
 

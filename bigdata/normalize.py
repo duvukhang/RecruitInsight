@@ -8,7 +8,16 @@ from recruitment.domain.salary import salary
 
 
 def text(value):
-    return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', str(value or ''))).strip()
+    return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', str(value if value is not None else ''))).strip()
+
+
+def metadata_object(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+    return value if isinstance(value, dict) else {}
 
 
 def normalize(payload_json, raw_ref, record_number, source, normalization=None):
@@ -37,6 +46,10 @@ def normalize(payload_json, raw_ref, record_number, source, normalization=None):
         posted=(parsed.replace(tzinfo=timezone.utc) if parsed and not parsed.tzinfo else parsed.astimezone(timezone.utc)).isoformat() if parsed else None
     except ValueError:
         posted = None
+    year_raw = raw.get('posted_year')
+    posted_year = int(year_raw) if not isinstance(year_raw, bool) and re.fullmatch(r'(?:19|20)\d{2}', str(year_raw)) else None
+    if posted_year is None and posted:
+        posted_year = int(posted[:4])
     try:
         if any(value is not None and not isinstance(value,str) for value in [raw.get('salary_currency'),raw.get('salary_period')]):
             raise TypeError('Invalid salary metadata type')
@@ -44,7 +57,7 @@ def normalize(payload_json, raw_ref, record_number, source, normalization=None):
     except (TypeError,ValueError,AttributeError,OverflowError):
         error=error or 'INVALID_SALARY_FIELDS'
         normalized_salary=salary(None)
-    stable_key = source + ':' + text(raw.get('source_job_id')) if raw.get('source_job_id') else hashlib.sha256(json.dumps(raw, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    stable_key = source + ':' + text(raw.get('source_job_id')) if raw.get('source_job_id') is not None and text(raw.get('source_job_id')) else hashlib.sha256(json.dumps(raw, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return {'raw_record_ref': raw_ref, 'record_number': record_number, 'source_job_key': stable_key,
         'global_duplicate_ref':raw.get('_global_duplicate_ref'),
         'error_code': error, 'job_title': title, 'job_title_normalized': title.lower(),
@@ -57,4 +70,9 @@ def normalize(payload_json, raw_ref, record_number, source, normalization=None):
         'remote_type': text(raw.get('remote_type')) or 'Unknown',
         'employment_type': text(raw.get('employment_type')) or 'Unknown',
         'job_description': re.sub('<[^>]*>', ' ', text(raw.get('job_description'))),
-        'posted_at': posted, 'source_url': text(raw.get('source_url')), **normalized_salary}
+        'posted_at': posted, 'posted_year': posted_year,
+        'source_job_id': text(raw.get('source_job_id')), 'original_record_id': text(raw.get('original_record_id')),
+        'dataset_origin': text(raw.get('dataset_origin')) or 'unknown',
+        'provenance_json': json.dumps(metadata_object(raw.get('source_metadata')), ensure_ascii=False),
+        'experience_metadata_json': json.dumps(metadata_object(raw.get('experience_metadata')), ensure_ascii=False),
+        'source_url': text(raw.get('source_url')), **normalized_salary}

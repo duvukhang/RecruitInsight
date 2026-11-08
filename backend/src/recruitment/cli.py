@@ -17,9 +17,10 @@ def main():
     args=parser.parse_args();db=database()
     if args.group=='users':
         password=getpass.getpass('New password (not logged): ')
-        if len(password)<12:raise ValueError('Password must have at least 12 characters')
-        db.users.insert_one({'_id':uid(),'username':args.username,'role':args.role,'enabled':True,
-            'password_hash':PasswordHasher().hash(password),'created_at':now()})
+        from recruitment.api.users import CreateUser
+        from recruitment.application.users import UsersService
+        body=CreateUser(username=args.username,password=password,role=args.role)
+        UsersService(db).create(body.username,body.password,body.role,'CLI')
         print(json.dumps({'created_user':args.username,'role':args.role}));return
     admin=db.users.find_one({'username':settings().admin_username,'role':'ADMIN'})
     if not admin:raise RuntimeError('Bootstrap administrator not found')

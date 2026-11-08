@@ -52,3 +52,29 @@ def test_prediction_ownership_and_missing_model(client_and_users):
             assert response.status_code==503
             assert response.json()['error']['code']=='MODEL_NOT_AVAILABLE'
     finally:db.salary_predictions.delete_one({'_id':identifier})
+
+
+def test_dashboard_active_model_and_version_scoped_latest_etl(client_and_users):
+    c, (admin, viewer), users = client_and_users
+    db = database()
+    version, model_id = uid(), uid()
+    old_pointer = db.system_settings.find_one({'_id': 'active_model'})
+    job_ids = [uid(), uid(), uid()]
+    from recruitment.domain.common import now
+    db.model_registry.insert_one({'_id': model_id, 'algorithm': 'linear', 'dataset_version': version, 'status': 'ACTIVE', 'artifact_sha256': 'TEST'})
+    db.system_settings.update_one({'_id': 'active_model'}, {'$set': {'value': model_id}, '$setOnInsert': {'revision': 1}}, upsert=True)
+    for identifier, kind, target in zip(job_ids, ['ETL', 'TRAINING', 'ETL'], [version, version, uid()]):
+        db.etl_jobs.insert_one({'_id': identifier, 'job_type': kind, 'status': 'QUEUED', 'created_at': now(), 'payload': {'dataset_version': target}})
+    try:
+        response = c.get('/api/v1/models?active_only=true', headers=admin).json()
+        assert response['meta']['total'] == 1 and response['data'][0]['is_active'] is True
+        assert c.get('/api/v1/models?active_only=true&dataset_version=unknown', headers=admin).json()['data'] == []
+        response = c.get('/api/v1/etl/jobs?job_type=ETL&dataset_version=' + version, headers=admin).json()
+        assert response['meta']['total'] == 1 and response['data'][0]['_id'] == job_ids[0]
+        assert c.get('/api/v1/models?active_only=true', headers=viewer).status_code == 403
+        assert c.get('/api/v1/etl/jobs?job_type=ETL', headers=viewer).status_code == 403
+    finally:
+        db.model_registry.delete_one({'_id': model_id})
+        db.etl_jobs.delete_many({'_id': {'$in': job_ids}})
+        if old_pointer: db.system_settings.replace_one({'_id': 'active_model'}, old_pointer, upsert=True)
+        else: db.system_settings.delete_one({'_id': 'active_model'})

@@ -64,11 +64,9 @@ export function ModelDiagnostics({ id }: { id: string }) {
               r.predicted / 1e6,
             ])}
           />
-          <p className="muted">Hiển thị {data.holdout.length} mẫu đầu tiên (tối đa 1.000); tải artifact để xem toàn bộ holdout. Đơn vị: triệu VND/tháng.</p>
           <h3>Phân bố sai số actual − predicted</h3>
           <Chart labels={bins.map((_, i) => (lower + i * width).toFixed(2))} values={bins} />
           <h3>Feature importance / |coefficient| (phụ thuộc model)</h3>
-          <p className="muted">Đây là trọng số của mô hình đã học, không chứng minh quan hệ nhân quả; không so trực tiếp trị số giữa các thuật toán.</p>
           <Chart
             labels={data.importance.map((r: any) => r.feature)}
             values={data.importance.map((r: any) => Math.abs(r.value))}
@@ -183,10 +181,6 @@ export function Benchmarks() {
       <div className="panel-title">
         <div>
           <h2>Spark benchmark</h2>
-          <p className="muted">
-            Median ba lần đo; warm-up không tính.
-            Read/normalize/dedup/aggregate, chưa gồm Mongo write.
-          </p>
         </div>
       </div>
       {query.error ? (

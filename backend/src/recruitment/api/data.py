@@ -12,6 +12,12 @@ from recruitment.application.pipeline import PipelineService
 router = APIRouter(prefix='/api/v1', tags=['Data'])
 
 
+@router.get('/sources')
+def sources(user=Depends(admin)):
+    from bigdata.sources import SOURCES, ADAPTER_VERSION
+    return {'data': [{'id': key, **value, 'adapter_version': ADAPTER_VERSION} for key, value in SOURCES.items()]}
+
+
 def require(collection, identifier):
     value = database()[collection].find_one({'_id': identifier})
     if not value:
@@ -31,11 +37,23 @@ class SourceMetadata(BaseModel):
     observation_from: date | None = None
     observation_to: date | None = None
     license_permission: str | None = Field(None, max_length=1000)
+    dataset_origin: Literal['synthetic', 'public_unverified', 'real', 'mixed', 'unknown'] | None = None
+    permission_status: Literal['NEEDS_REVIEW', 'DECLARED_PERMISSION', 'SYNTHETIC_FIXTURE'] | None = None
+    permission_evidence: str | None = Field(None, max_length=1000)
+    adapter_version: str | None = Field(None, max_length=100)
+    source_revision: str | None = Field(None, max_length=100)
+    source_dataset_url: str | None = Field(None, max_length=500)
+    input_sha256: str | None = Field(None, pattern=r'^[a-f0-9]{64}$')
+    row_count: int | None = Field(None, ge=0)
+    observation_year_from: int | None = Field(None, ge=1900, le=2099)
+    observation_year_to: int | None = Field(None, ge=1900, le=2099)
 
     @model_validator(mode='after')
     def ordered_period(self):
         if self.observation_from and self.observation_to and self.observation_from > self.observation_to:
             raise ValueError('Observation period must be ordered')
+        if self.observation_year_from and self.observation_year_to and self.observation_year_from > self.observation_year_to:
+            raise ValueError('Observation years must be ordered')
         return self
 
 
@@ -54,9 +72,74 @@ async def upload(file: UploadFile = File(), source: str = Form(min_length=1, max
 @router.get('/datasets')
 def datasets(page: int = Query(1, ge=1, le=400), page_size: int = Query(25, ge=1, le=100), user=Depends(current_user)):
     result = page_result('datasets', {} if user['role']=='ADMIN' else {'status':'PUBLISHED'}, page, page_size)
+    active = database().system_settings.find_one({'_id': 'active_dataset'}, {'value': 1})
+    result['meta']['active_dataset_version'] = active['value'] if active else None
     for item in result['data']:
         item.pop('file_ref', None); item.pop('raw_file_ref', None)
     return result
+
+
+class ChunkManifest(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    bytes: int = Field(gt=0, le=50 * 1024 * 1024)
+    row_count: int = Field(gt=0, le=500000)
+
+
+class StagedRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    source: str = Field(min_length=1, max_length=100)
+    is_demo: bool = True
+    source_metadata: SourceMetadata
+    chunks: list[ChunkManifest] = Field(min_length=1, max_length=128)
+
+
+class StagedCreated(BaseModel):
+    dataset_version: str
+    chunk_count: int
+
+
+class StagedResponse(BaseModel):
+    data: StagedCreated
+
+
+class ChunkReceived(BaseModel):
+    index: int
+    sha256: str
+    bytes: int
+
+
+class ChunkResponse(BaseModel):
+    data: ChunkReceived
+
+
+class IngestionQueued(BaseModel):
+    dataset_version: str
+    ingestion_id: str
+    job_id: str
+    status_url: str
+
+
+class IngestionResponse(BaseModel):
+    data: IngestionQueued
+
+
+@router.post('/datasets/staged', status_code=201, response_model=StagedResponse)
+def create_staged(body: StagedRequest, idempotency_key: str = Header(default=''), user=Depends(admin)):
+    from recruitment.application.staged_import import StagedImport
+    return {'data': StagedImport(database()).create(body, user['_id'], idempotency_key)}
+
+
+@router.put('/datasets/staged/{version}/chunks/{index}', response_model=ChunkResponse)
+async def staged_chunk(version: str, index: int, file: UploadFile = File(), user=Depends(admin)):
+    from recruitment.application.staged_import import StagedImport
+    return {'data': await StagedImport(database()).chunk(version, index, file)}
+
+
+@router.post('/datasets/staged/{version}/complete', status_code=202, response_model=IngestionResponse)
+def staged_complete(version: str, user=Depends(admin)):
+    from recruitment.application.staged_import import StagedImport
+    return {'data': StagedImport(database()).seal(version)}
 
 
 @router.get('/datasets/{version}')
@@ -95,8 +178,12 @@ def submit_etl(body: ETLRequest, user=Depends(admin)):
 
 
 @router.get('/etl/jobs')
-def jobs(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), user=Depends(admin)):
-    return page_result('etl_jobs', {}, page, page_size)
+def jobs(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
+         dataset_version: str | None = Query(None, max_length=128), job_type: Literal['ETL', 'INGESTION', 'TRAINING'] | None = None, user=Depends(admin)):
+    match={}
+    if dataset_version:match['payload.dataset_version']=dataset_version
+    if job_type:match['job_type']=job_type
+    return page_result('etl_jobs', match, page, page_size)
 
 
 @router.get('/etl/jobs/{identifier}')

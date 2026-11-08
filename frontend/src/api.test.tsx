@@ -37,9 +37,10 @@ describe("token refresh", () => {
       data: { access_token: "fixture-old" },
       csrf_token: "fixture-csrf",
     });
-    await Promise.all([api("/jobs"), api("/datasets")]);
+    await Promise.all([api("/jobs"), api("/datasets"), api('/auth/profile')]);
     expect(calls["/api/v1/auth/refresh"]).toBe(1);
     expect(calls["/api/v1/jobs"]).toBe(2);
     expect(calls["/api/v1/datasets"]).toBe(2);
+    expect(calls['/api/v1/auth/profile']).toBe(2);
   });
 });

@@ -33,7 +33,10 @@ def run(sizes=(100,10000,100000),repeats=3):
             for i,record in enumerate(input_records(source),1):
                 output.write(json.dumps({'record_number':i,'raw_record_ref':str(i),'payload_json':json.dumps(record,ensure_ascii=False)},ensure_ascii=False)+'\n')
         files[size]=str(path)
-    environment['input_hashes']={str(size):hashlib.sha256(Path(path).read_bytes()).hexdigest() for size,path in files.items()}
+    environment['input_hashes'] = {}
+    for size, path in files.items():
+        with Path(path).open('rb') as stream:
+            environment['input_hashes'][str(size)] = hashlib.file_digest(stream, 'sha256').hexdigest()
     observations=[];fingerprints={}
     original_master=os.environ.get('SPARK_MASTER')
     original_cores=os.environ.get('SPARK_MAX_CORES')

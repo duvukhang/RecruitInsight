@@ -11,6 +11,7 @@ test.beforeEach(async ({ page }) => {
       warnings: ["HIGH_MISSING_SALARY_LABEL_RATE"], method: "TEST FIXTURE", updated_at: "2026-02-01" };
     let body: any = { data: [] };
     if (path === "/auth/refresh") body = { data: { access_token: "TEST-ONLY", user: { id: "test", username: "test", role: "ADMIN" } }, csrf_token: "TEST-ONLY" };
+    else if (path === '/auth/me') body = { data: { id: 'test', username: 'test', role: 'ADMIN' } };
     else if (path === "/datasets") body = { data: [{ _id: "TEST-UI-dataset", source: "TEST", status: "PUBLISHED", is_demo: true }] };
     else if (path === "/jobs/filters/options") body = { data: { provinces: ["HCM"], industries: ["IT"] } };
     else if (path === "/analytics/overview") body = { data: { total_jobs: 40, total_companies: 10, total_industries: 1, total_provinces: 1, salary_sample_size: 2, median_salary_vnd: 15e6 }, meta };
@@ -24,9 +25,11 @@ test.beforeEach(async ({ page }) => {
 test("salary context, small sample, filters and mobile layout with UI fixture", async ({ page }) => {
   await page.goto("/analytics/salary");
   await expect(page.getByText("Ít mẫu lương (<30)")).toBeVisible();
-  await expect(page.getByText("Thiếu nhãn: 95.0%", { exact: false })).toBeVisible();
+  await expect(page.getByText("Thiếu nhãn:", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Ngày đăng quan sát:", { exact: false })).toHaveCount(0);
   await page.getByLabel("Địa phương", { exact: true }).selectOption("HCM");
-  await expect(page.getByText("Địa phương: HCM", { exact: false })).toBeVisible();
+  await expect(page.getByLabel("Địa phương", { exact: true })).toHaveValue("HCM");
+  await expect(page).toHaveURL(/province=HCM/);
   await page.screenshot({ path: fileURLToPath(new URL("../../artifacts/upgrade-salary-desktop.png", import.meta.url)), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: fileURLToPath(new URL("../../artifacts/upgrade-salary-mobile.png", import.meta.url)), fullPage: true });

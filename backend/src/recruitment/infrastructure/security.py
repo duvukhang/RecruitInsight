@@ -12,7 +12,7 @@ DUMMY_HASH = hasher.hash(secrets.token_urlsafe(32))
 
 
 def access_token(user):
-    return jwt.encode({'sub': user['_id'], 'role': user['role'], 'iss': 'recruitment',
+    return jwt.encode({'sub': user['_id'], 'role': user['role'], 'auth_version': user.get('auth_version', 0), 'iss': 'recruitment',
                        'aud': 'recruitment-web', 'iat': now(), 'exp': now() + timedelta(minutes=15)},
                       settings().jwt_secret.get_secret_value(), algorithm='HS256')
 

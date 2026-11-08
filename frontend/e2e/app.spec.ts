@@ -29,9 +29,9 @@ test("login, real dashboard, filters, model prediction and history", async ({
   await page
     .getByLabel("Dataset version", { exact: true })
     .selectOption(evidence.dataset_version);
-  await expect(page.getByText(total, { exact: true })).toBeVisible();
+  await expect(page.locator('.stat').first()).toContainText(total);
   await page.getByLabel("Địa phương", { exact: true }).selectOption("Hà Nội");
-  await expect(page.getByText(total, { exact: true })).toHaveCount(0);
+  await expect(page.locator('.stat').first()).not.toContainText(total);
   await page
     .getByRole("link", { name: "Danh sách việc làm", exact: true })
     .click();

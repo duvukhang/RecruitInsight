@@ -2,6 +2,8 @@
 
 Tài liệu mô tả source hiện tại; bằng chứng runtime mới và phần BLOCKED nằm ở [báo cáo nâng cấp](reports/research-upgrade.md). Thiết kế ban đầu chưa triển khai không được coi là kết quả.
 
+RecruitInsight 2.0 bổ sung [adapter/staged/provenance](real-data-import.md) và [báo cáo mới](reports/upgrade-results.md). Staged JSONL khóa manifest/checksum rồi dùng chính ingestion/attempt/quality gate dưới đây. posted_year nullable đi riêng posted_at; không sửa ngày của dataset đã công bố. Salary parser thêm `40tr`/`upto`; CSV export chặn công thức kể cả whitespace đứng trước. Tham chiếu 05/11 trong báo cáo nghiên cứu cũ là lịch sử.
+
 ## Ingestion và nguồn
 
 Upload CSV/JSON/JSONL tối đa 50 MiB, streaming ghi file và SHA-256 trước enqueue. CSV giữ dòng dư cột thành parse error; JSONL giữ original_line hỏng; JSON array bị hỏng toàn file khiến run FAILED. Raw payload và file gốc giữ nguyên để đối soát. Mỗi raw có record_number, raw_record_ref, dataset_version, source và ingested_at. Dataset lưu source, is_demo, hash, original_filename, schema_version, file_ref, format và created_at.

@@ -15,6 +15,8 @@ from recruitment.api.data import router as data_router
 from recruitment.api.analytics import router as analytics_router
 from recruitment.api.models import router as models_router
 from recruitment.api.reports import router as reports_router
+from recruitment.api.users import router as users_router
+from recruitment.api.profile import router as profile_router
 
 app = FastAPI(title="Recruitment Big Data", version="0.1.0")
 app.include_router(auth_router)
@@ -23,6 +25,8 @@ app.include_router(data_router)
 app.include_router(analytics_router)
 app.include_router(models_router)
 app.include_router(reports_router)
+app.include_router(users_router)
+app.include_router(profile_router)
 logger = logging.getLogger('recruitment.http')
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 

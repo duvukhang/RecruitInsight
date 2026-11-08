@@ -8,8 +8,10 @@ import {
   LogOut,
   LoaderCircle,
 } from "lucide-react";
-import { api, remember, clearSession, csrfHeaders } from "./api";
-import { NavLink } from "react-router-dom";
+import { api, remember, clearSession, csrfHeaders, ApiError } from "./api";
+import { NavLink, useLocation } from "react-router-dom";
+import { can, routePermission } from './permissions';
+import { RoleBadge } from './components/insights';
 import {
   LayoutDashboard,
   ChartNoAxesCombined,
@@ -20,12 +22,17 @@ import {
   Workflow,
   Settings,
   ScanLine,
+  UserRound,
+  ChevronDown,
 } from "lucide-react";
 import Workspace from "./Workspace";
-type User = { id: string; username: string; role: string };
+import { avatarColors } from './Profile';
+import ThemeToggle from './ThemeToggle';
+type User = { id: string; username: string; role: string; display_name?: string; avatar_color?: string };
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [notice] = React.useState(() => { const value = sessionStorage.getItem('auth-notice') || ''; sessionStorage.removeItem('auth-notice'); return value; });
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
@@ -58,25 +65,21 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
             <br />
             Góc nhìn có cơ sở.
           </h1>
-          <p>
-            Phân tích dữ liệu, theo dõi chất lượng và khám phá mức lương trên
-            cùng một nền tảng.
-          </p>
           <div className="story-tags">
             <span>Apache Spark</span>
             <span>MongoDB</span>
             <span>Machine Learning</span>
           </div>
         </div>
-        <small>Đồ án Big Data · Recruitment Analytics</small>
       </section>
       <section className="login-panel">
+        <div className="login-theme"><ThemeToggle /></div>
         <form onSubmit={submit}>
           <span className="small-icon">
             <ShieldCheck />
           </span>
           <h2>Chào mừng trở lại</h2>
-          <p className="muted">Đăng nhập để truy cập không gian phân tích.</p>
+          {notice && <div className="notice" role="status">{notice}</div>}
           <label>
             Tên đăng nhập
             <input
@@ -105,9 +108,6 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
             {busy && <LoaderCircle className="spin" size={18} />}{" "}
             {busy ? "Đang đăng nhập…" : "Đăng nhập"} <ArrowUpRight size={18} />
           </Button>
-          <p className="login-help">
-            Tài khoản quản trị được cấu hình trong file .env của dự án.
-          </p>
         </form>
       </section>
     </div>
@@ -127,6 +127,36 @@ export default function App() {
   const [user, setUser] = React.useState<User | null>(null);
   const [checking, setChecking] = React.useState(true);
   const client = useQueryClient();
+  const location = useLocation();
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  React.useEffect(() => {
+    setMenuOpen(false);
+    document.scrollingElement?.scrollTo?.(0, 0);
+  }, [location.pathname]);
+  React.useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    let previousRole = user.role;
+    const sync = async () => {
+      try {
+        const result = await api('/auth/me');
+        if (!cancelled) {
+          if (previousRole !== result.data.role) client.clear();
+          previousRole = result.data.role;
+          setUser(result.data);
+        }
+      } catch (error) {
+        if (!cancelled && error instanceof ApiError && error.status === 401) {
+          clearSession(); setUser(null); client.clear();
+        }
+      }
+    };
+    sync();
+    const timer = window.setInterval(sync, 30000);
+    window.addEventListener('focus', sync);
+    window.addEventListener('app-user-changed', sync);
+    return () => { cancelled = true; window.clearInterval(timer); window.removeEventListener('focus', sync); window.removeEventListener('app-user-changed', sync); };
+  }, [user?.id, client]);
   React.useEffect(() => {
     const expired = () => {
       setUser(null);
@@ -165,41 +195,38 @@ export default function App() {
     { path: "/etl", label: "Giám sát ETL", icon: Workflow },
     { path: "/models", label: "Machine Learning", icon: BrainCircuit },
     { path: "/settings", label: "Hệ thống", icon: Settings },
+    { path: "/sources", label: "Nguồn dữ liệu", icon: FolderOpen },
+    { path: "/quality", label: "Chất lượng dữ liệu", icon: ShieldCheck },
+    { path: "/users", label: "Người dùng", icon: ShieldCheck },
+    { path: "/audit", label: "Nhật ký quản trị", icon: Workflow },
+    { path: '/profile', label: 'Hồ sơ cá nhân', icon: UserRound },
   ];
   return (
     <div className="shell">
       <Notices />
-      <aside>
+      <aside className={menuOpen ? 'menu-open' : ''}>
         <Brand />
+        <button className="mobile-menu" aria-expanded={menuOpen} aria-controls="main-navigation" onClick={() => setMenuOpen(!menuOpen)}>Menu</button>
         <div className="workspace-label">KHÔNG GIAN LÀM VIỆC</div>
-        <nav>
+        <nav id="main-navigation" aria-label="Điều hướng chính">
           {navigation
             .filter(
-              (n) =>
-                user.role === "ADMIN" ||
-                [
-                  "/",
-                  "/analytics/recruitment",
-                  "/analytics/salary",
-                  "/jobs",
-                  ...(user.role === "ANALYST"
-                    ? ["/predictions", "/models"]
-                    : []),
-                ].includes(n.path),
+              (n) => can(user.role, routePermission[n.path] || 'read'),
             )
-            .map((n) => (
-              <NavLink key={n.path} to={n.path} end={n.path === "/"}>
-                <n.icon size={18} />
-                {n.label}
-              </NavLink>
+            .sort((a, b) => navGroup(a.path).order - navGroup(b.path).order)
+            .map((n, index, visible) => (
+              <React.Fragment key={n.path}>
+                {(index === 0 || navGroup(visible[index - 1].path).name !== navGroup(n.path).name) && <div className="nav-group">{navGroup(n.path).name}</div>}
+                <NavLink to={{ pathname: n.path, search: location.search }} end={n.path === "/"}><n.icon size={18} />{n.label}</NavLink>
+              </React.Fragment>
             ))}
         </nav>
         <div className="sidebar-foot">
-          <span className="avatar">{user.username[0].toUpperCase()}</span>
-          <div>
-            <strong>{user.username}</strong>
-            <small>{user.role}</small>
-          </div>
+          <NavLink to="/profile" className="avatar" aria-label="Mở hồ sơ cá nhân" style={{ background: avatarColors[user.avatar_color || 'cyan'] }}>{Array.from(user.display_name || user.username)[0].toUpperCase()}</NavLink>
+          <NavLink to="/profile" className="profile-summary">
+            <strong title={user.display_name || user.username}>{user.display_name || user.username}</strong>
+            <RoleBadge role={user.role} />
+          </NavLink>
           <button
             aria-label="Đăng xuất"
             onClick={async () => {
@@ -224,20 +251,25 @@ export default function App() {
       <div className="content">
         <header>
           <span>
-            Recruitment Analytics <span className="slash">/</span> Workspace
+            RecruitInsight <span className="slash">/</span> {navigation.find(n => n.path === location.pathname)?.label || 'Tổng quan'}
           </span>
-          <span className="header-tag">BIG DATA PROJECT</span>
+          <div className="header-actions"><ThemeToggle /><NavLink to="/profile" className="account-chip" aria-label="Hồ sơ cá nhân"><span className="avatar" style={{ background: avatarColors[user.avatar_color || 'cyan'] }}>{Array.from(user.display_name || user.username)[0].toUpperCase()}</span><span className="account-chip-name">{user.display_name || user.username}<small>Hồ sơ của tôi</small></span><ChevronDown size={14} /></NavLink></div>
         </header>
         <main>
           <Workspace role={user.role} />
         </main>
-        <footer>
-          Recruitment Data Analytics & Salary Prediction{" "}
-          <span>Apache Spark · MongoDB · FastAPI</span>
-        </footer>
       </div>
     </div>
   );
+}
+
+function navGroup(path: string) {
+  if (path === '/profile') return { order: 5, name: 'Tài khoản' };
+  if (path === '/') return { order: 0, name: 'Tổng quan' };
+  if (path.startsWith('/analytics') || path === '/jobs') return { order: 1, name: 'Phân tích' };
+  if (['/models', '/predictions'].includes(path)) return { order: 2, name: 'Machine Learning' };
+  if (['/datasets', '/sources', '/quality', '/etl'].includes(path)) return { order: 3, name: 'Dữ liệu & ETL' };
+  return { order: 4, name: 'Quản trị' };
 }
 
 function Notices() {

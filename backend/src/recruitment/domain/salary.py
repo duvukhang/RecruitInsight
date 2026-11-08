@@ -32,7 +32,7 @@ def salary(text, currency=None, period=None, normalization=None):
         return result
     if re.match(r'^-\s*\d', value):
         result['salary_quality_status']='INVALID_VALUE';return result
-    currency = (currency or ('USD' if 'usd' in value or '$' in value else 'VND' if re.search(r'vnd|triệu|trieu|\bđ\b', value) else '')).upper()
+    currency = (currency or ('USD' if 'usd' in value or '$' in value else 'VND' if re.search(r'vnd|vnđ|triệu|trieu|\bđ\b|\d\s*tr\b', value) else '')).upper()
     result['salary_currency'] = currency or None
     result['salary_is_disclosed'] = True
     values = re.findall(r'\d+(?:[.,]\d+)*', value)
@@ -41,14 +41,14 @@ def salary(text, currency=None, period=None, normalization=None):
     parsed = [number(x) for x in values]
     if any(x is None for x in parsed):
         result['salary_quality_status']='INVALID_VALUE';return result
-    scale = 1_000_000 if 'triệu' in value or 'trieu' in value else 1
+    scale = 1_000_000 if re.search(r'triệu|trieu|\d\s*tr\b', value) else 1
     parsed = [x * scale for x in parsed]
     if any(x <= 0 or x > 1e12 for x in parsed):
         result['salary_quality_status'] = 'INVALID_VALUE';return result
     lower = upper = None
     if len(parsed) == 2:
         lower, upper = parsed
-    elif any(x in value for x in ['up to', 'tối đa', 'đến ', 'dưới']):
+    elif any(x in value for x in ['up to', 'upto', 'tối đa', 'đến ', 'dưới']):
         upper = parsed[0]
     elif any(x in value for x in ['from ', 'từ ', 'trên', 'at least']):
         lower = parsed[0]

@@ -9,7 +9,7 @@ class AuthService:
     def __init__(self, db):
         self.db = db
 
-    def login(self, username, password, peer):
+    def login(self, username, password, peer, user_agent=''):
         minute = now().strftime('%Y%m%d%H%M')
         # Atomic, shared limit across API replicas. No password/token is persisted here.
         counter = self.db.auth_limits.find_one_and_update({'_id': peer + ':' + minute},
@@ -24,12 +24,16 @@ class AuthService:
         raw = secrets.token_urlsafe(48)
         csrf = secrets.token_urlsafe(24)
         self.db.auth_sessions.insert_one({'_id': token_hash(raw), 'user_id': user['_id'],
-            'csrf_hash': token_hash(csrf), 'expires_at': now() + timedelta(days=7), 'created_at': now()})
+            'auth_version': user.get('auth_version', 0),
+            'csrf_hash': token_hash(csrf), 'expires_at': now() + timedelta(days=7), 'created_at': now(),
+            'last_seen_at': now(), 'user_agent': user_agent[:256]})
+        self.db.users.update_one({'_id': user['_id']}, {'$set': {'last_login_at': now()}})
         return self.response(user), raw, csrf
 
     def response(self, user):
+        from recruitment.application.profile import identity
         return {'access_token': access_token(user), 'token_type': 'bearer', 'expires_in': 900,
-                'user': {'id': user['_id'], 'username': user['username'], 'role': user['role']}}
+                'user': identity(user)}
 
     def refresh(self, raw, csrf):
         session = self.db.auth_sessions.find_one_and_delete({'_id': token_hash(raw),
@@ -37,9 +41,11 @@ class AuthService:
         if not session:
             raise AppError('UNAUTHENTICATED', 'Phiên đăng nhập đã hết hạn.', 401)
         user = self.db.users.find_one({'_id': session['user_id'], 'enabled': True})
-        if not user:
+        if not user or session.get('auth_version', 0) != user.get('auth_version', 0):
             raise AppError('UNAUTHENTICATED', 'Tài khoản không khả dụng.', 401)
         fresh, new_csrf = secrets.token_urlsafe(48), secrets.token_urlsafe(24)
         self.db.auth_sessions.insert_one({'_id': token_hash(fresh), 'user_id': user['_id'],
-            'csrf_hash': token_hash(new_csrf), 'expires_at': now() + timedelta(days=7), 'created_at': now()})
+            'auth_version': user.get('auth_version', 0),
+            'csrf_hash': token_hash(new_csrf), 'expires_at': now() + timedelta(days=7), 'created_at': session.get('created_at', now()),
+            'last_seen_at': now(), 'user_agent': session.get('user_agent', '')})
         return self.response(user), fresh, new_csrf

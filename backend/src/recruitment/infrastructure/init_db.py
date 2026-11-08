@@ -50,6 +50,7 @@ def migrate(db):
         "analytics_snapshots": [([("dataset_version", 1), ("attempt_id", 1)], True)],
         "etl_jobs": [([("status", 1), ("job_type", 1), ("created_at", 1)], False), ([("status", 1), ("lease_until", 1)], False)],
         "users": [([("username", 1)], True)],
+        "audit_logs": [([('created_at', -1), ('_id', -1)], False), ([('actor_id', 1), ('created_at', -1)], False)],
         "salary_predictions": [([("user_id", 1), ("created_at", -1)], False)],
         "model_registry": [([('dataset_version',1),('created_at',-1)],False)],
         "datasets": [([("created_by", 1), ("idempotency_key", 1)], True)],
@@ -58,6 +59,10 @@ def migrate(db):
         for keys, unique in definitions:
             db[name].create_index(keys, unique=unique)
     db.auth_sessions.create_index('expires_at', expireAfterSeconds=0)
+    db.auth_sessions.create_index('user_id')
+    db.etl_jobs.create_index([('payload.dataset_version', 1), ('job_type', 1), ('created_at', -1), ('_id', 1)])
+    for field in ['salary_mid_vnd', 'experience_years', 'posted_year', 'company_name', 'job_title', 'posted_at']:
+        db.cleaned_jobs.create_index([('dataset_version', 1), ('attempt_id', 1), (field, 1), ('_id', 1)])
     db.auth_limits.create_index('expires_at', expireAfterSeconds=0)
     db.system_settings.update_one({"_id": "schema"}, {"$set": {"value": 1, "revision": 1}}, upsert=True)
 

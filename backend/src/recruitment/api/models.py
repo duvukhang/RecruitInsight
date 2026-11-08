@@ -39,9 +39,11 @@ def submit(body:TrainRequest,user=Depends(admin)):
 
 
 @router.get('/models')
-def models(page:int=Query(1,ge=1,le=400),page_size:int=Query(25,ge=1,le=100),dataset_version:str|None=None,user=Depends(analyst)):
-    result=page_result('model_registry',{'dataset_version':dataset_version} if dataset_version else {},page,page_size)
+def models(page:int=Query(1,ge=1,le=400),page_size:int=Query(25,ge=1,le=100),dataset_version:str|None=None,active_only:bool=False,user=Depends(analyst)):
     active=database().system_settings.find_one({'_id':'active_model'})
+    match={'dataset_version':dataset_version} if dataset_version else {}
+    if active_only:match['_id']=active['value'] if active else '__NO_ACTIVE_MODEL__'
+    result=page_result('model_registry',match,page,page_size)
     for model in result['data']:
         model.pop('artifact_uri',None);model['is_active']=bool(active and active['value']==model['_id'])
     return result

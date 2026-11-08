@@ -67,7 +67,8 @@ def test_publish_and_quality_failure_preserves_pointer():
             rows=[]
             for i in range(20):
                 value={'job_title':'Engineer' if should_pass or i<5 else '', 'company_name':'A',
-                       'source_job_id':str(i), 'salary':'10–20 triệu VND/tháng'}
+                       'source_job_id':str(i), 'salary':'10–20 triệu VND/tháng', 'posted_year': 2024,
+                       'source_metadata': json.dumps({'permission_status': 'SYNTHETIC_FIXTURE'}) if i % 2 else {'permission_status': 'SYNTHETIC_FIXTURE'}}
                 rows.append(json.dumps({'record_number':i,'raw_record_ref':version+':'+str(i),'payload_json':json.dumps(value)}))
             path.write_text('\n'.join(rows),encoding='utf-8')
             db.datasets.insert_one({'_id':version,'dataset_id':version,'status':'RAW_READY','is_demo':True,
@@ -80,6 +81,15 @@ def test_publish_and_quality_failure_preserves_pointer():
                 assert db.system_settings.find_one({'_id':'active_dataset'})['value']==version
                 active=version
                 assert db.cleaned_jobs.count_documents({'dataset_version':version,'attempt_id':job['attempt_id']})==20
+                cleaned = db.cleaned_jobs.find_one({'dataset_version': version})
+                assert cleaned['posted_year'] == 2024 and cleaned['posted_at'] is None
+                assert cleaned['source_metadata']['permission_status'] == 'SYNTHETIC_FIXTURE'
+                assert db.cleaned_jobs.count_documents({'dataset_version': version, 'source_metadata.permission_status': 'SYNTHETIC_FIXTURE'}) == 20
+                report = db.data_quality_reports.find_one({'attempt_id': job['attempt_id']})
+                assert report['profile']['year_from'] == 2024
+                assert report['profile']['salary_parse_status']['VALID_RANGE'] == 20
+                assert report['profile']['industries'] == 0 and report['profile']['provinces'] == 0
+                assert db.analytics_snapshots.find_one({'attempt_id': job['attempt_id']})['data']['years'] == [{'posted_year': 2024, 'count': 20}]
             else:
                 with pytest.raises(AppError) as failure:
                     etl(db,job,lambda:None)

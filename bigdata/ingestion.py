@@ -40,7 +40,12 @@ def ingest(db, job, guard):
     temporary = canonical.with_name(job['attempt_id'] + '.tmp')
     try:
         with temporary.open('w', encoding='utf-8') as output:
-            for number, raw in enumerate(input_records(dataset['file_ref']), 1):
+            if dataset.get('staged'):
+                from recruitment.application.staged_import import staged_records
+                records = staged_records(dataset)
+            else:
+                records = input_records(dataset['file_ref'])
+            for number, raw in enumerate(records, 1):
                 if len(json.dumps(raw, ensure_ascii=False).encode()) > 1024 * 1024:
                     raise AppError('RECORD_TOO_LARGE', f'Record {number} vượt 1 MiB.')
                 record = {'_id': f'{version}:{number}', 'dataset_version': version,

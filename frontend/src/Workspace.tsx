@@ -2,7 +2,7 @@ import { Button } from "./components/ui/button";
 import ConfigPanel from "./ConfigPanel";
 import { QualityRecords, Benchmarks, ModelDiagnostics } from "./ExtraReports";
 import React, { createContext, useContext, useState } from "react";
-import { Routes, Route, Link, useLocation } from "react-router-dom";
+import { Routes, Route, Link, useLocation, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Database,
@@ -22,6 +22,12 @@ import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { api } from "./api";
 import { Chart } from "./Chart";
+import AdminUsers, { AuditLogs } from './AdminUsers';
+import Sources from './Sources';
+import QualityDashboard from './QualityDashboard';
+import Profile from './Profile';
+import { can, routePermission, Forbidden, PermissionGate } from './permissions';
+import { StatCard, InsightPanel, PageHeader, FilterToolbar, DetailDialog, ModelBadge } from './components/insights';
 type Row = Record<string, any>;
 const Context = createContext({
   version: "",
@@ -70,27 +76,7 @@ function Status({
     );
   return <>{children}</>;
 }
-function Panel({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="panel">
-      <div className="panel-title">
-        <div>
-          <h2>{title}</h2>
-          {subtitle && <p className="muted">{subtitle}</p>}
-        </div>
-      </div>
-      {children}
-    </section>
-  );
-}
+const Panel = InsightPanel;
 export function money(value: number | null | undefined) {
   return value == null
     ? "Chưa có dữ liệu"
@@ -117,20 +103,6 @@ function Badge({ status }: { status: string }) {
     >
       {status}
     </span>
-  );
-}
-function ObservationScope({ meta }: { meta?: Row }) {
-  const filters = useContext(Context);
-  if (!meta) return null;
-  const period = meta.reference_period;
-  return (
-    <div className="data-foot">
-      {meta.is_demo && <div className="demo-notice">DEMO · Dữ liệu tổng hợp, không đại diện thị trường lao động thực.</div>}
-      Dataset <ShortId id={meta.dataset_version} /> · {meta.sample_size} tin · {meta.eligible_count} nhãn lương · Thiếu nhãn: {meta.missing_salary_rate == null ? "—" : (100 * meta.missing_salary_rate).toFixed(1) + "%"}
-      <br />
-      Ngày đăng quan sát: {period?.from ? `${period.from.slice(0, 10)} – ${period.to?.slice(0, 10)}` : "Chưa có ngày đăng hợp lệ"} · Địa phương: {filters.province || "Tất cả"} · Ngành: {filters.industry || "Tất cả"} · Ngày lọc: {filters.postedFrom || "Mở"} – {filters.postedTo || "Mở"}
-      <p>Số tin chỉ mô tả tập dữ liệu quan sát. Lương công bố (VND/tháng) có thể khác lương thực nhận; quan hệ đồng xuất hiện không chứng minh nguyên nhân.</p>
-    </div>
   );
 }
 function Table({
@@ -165,46 +137,41 @@ function Table({
   );
 }
 function Dashboard() {
+  const { role } = useContext(Context);
   const overview = useData("/analytics/overview", true),
     trends = useData("/analytics/job-trends", true),
     industry = useData("/analytics/salary-by-industry", true),
     skills = useData("/analytics/top-skills", true);
+  const years = useData('/analytics/job-years', true);
+  const locations = useData('/analytics/salary-by-location', true), histogram = useData('/analytics/salary-distribution', true);
   const data = overview.data?.data;
   const meta = overview.data?.meta;
+  const activeModel = useQuery({ queryKey: ['dashboard-active-model', role], queryFn: () => api('/models?active_only=true'), enabled: can(role, 'predict'), refetchInterval: 8000 });
+  const latestETL = useQuery({ queryKey: ['dashboard-latest-etl', meta?.dataset_version, role],
+    queryFn: () => api('/etl/jobs?page_size=1&job_type=ETL&dataset_version=' + encodeURIComponent(meta?.dataset_version)),
+    enabled: can(role, 'manage') && !!meta?.dataset_version, refetchInterval: 8000 });
+  const model = activeModel.data?.data?.[0], lastJob = latestETL.data?.data?.[0];
   return (
     <Status query={overview}>
       {data && (
-        <>
-          {meta.is_demo && (
-            <div className="demo-notice">
-              DEMO · Dữ liệu tổng hợp để kiểm thử, không đại diện thị trường
-              tuyển dụng thực.
+        <div className="dashboard-v3">
+          <section className="dashboard-hero">
+            <div className="hero-copy"><div className="hero-kicker"><span className="live-dot" /> TỔNG QUAN TUYỂN DỤNG</div><h2>Dữ liệu tuyển dụng.<br /><span>Góc nhìn rộng hơn.</span></h2>
+              <div className="hero-actions"><Link className="hero-primary" to="/jobs"><BriefcaseBusiness size={17} /> Khám phá việc làm <ArrowRight size={16} /></Link><Link className="hero-secondary" to="/profile">Hồ sơ của tôi ↗</Link></div>
             </div>
-          )}
-          {meta.warnings?.includes("SMALL_SAMPLE") && (
-            <div className="demo-notice">
-              Mẫu dưới 30 tin. Xem số mẫu trước khi diễn giải kết quả.
-            </div>
-          )}
-          {meta.warnings?.includes("HIGH_MISSING_SALARY_LABEL_RATE") && (
-            <div className="demo-notice">
-              Hơn 50% tin chưa đủ nhãn lương chuẩn hóa; phân tích lương chỉ dùng
-              phần có nhãn hợp lệ.
-            </div>
-          )}
+            <div className="hero-observatory"><div className="data-orbit" aria-hidden="true"><i /><i /><i /><Database size={44} /></div><div className="hero-count"><span>TIN TRONG PHẠM VI ĐANG XEM</span><strong>{data.total_jobs?.toLocaleString('vi-VN')}</strong><small>{data.total_industries ?? '—'} ngành có thông tin · {data.total_provinces ?? '—'} địa phương</small></div></div>
+          </section>
           <div className="stat-grid four">
             {[
               {
                 label: "Tổng tin tuyển dụng",
                 value: data.total_jobs?.toLocaleString("vi-VN"),
                 icon: BriefcaseBusiness,
-                note: "Tin đã làm sạch, loại trùng",
               },
               {
                 label: "Doanh nghiệp",
                 value: data.total_companies,
                 icon: Building2,
-                note: "Trong dataset đang chọn",
               },
               {
                 label: "Lương trung vị / tháng",
@@ -220,33 +187,33 @@ function Dashboard() {
                     ) + "%"
                   : "—",
                 icon: Database,
-                note: "Coverage của dữ liệu lương",
               },
             ].map((s) => (
-              <article className="stat" key={s.label}>
-                <s.icon />
-                <span>{s.label}</span>
-                <strong>{s.value}</strong>
-                <small>{s.note}</small>
-              </article>
+              <StatCard key={s.label} {...s} />
             ))}
+          </div>
+          <div className="dashboard-summary">
+            {can(role, 'predict') && <Panel title="Mô hình đang dùng · toàn hệ thống"><Status query={activeModel}>
+              {model ? <div className="summary-body"><ModelBadge active /><h3>{model.algorithm}</h3><div>MAE: {money(model.test_metrics?.mae)} · RMSE: {money(model.test_metrics?.rmse)}</div><div>N train/validation/test: {model.sample_counts?.train ?? '—'} / {model.sample_counts?.validation ?? '—'} / {model.sample_counts?.test ?? '—'}</div><div className="data-foot">Dataset huấn luyện: <ShortId id={model.dataset_version} /> · Model: <ShortId id={model._id} /></div><Link to="/models">Xem registry & đánh giá</Link></div> : <div className="empty">Chưa có mô hình được kích hoạt.</div>}
+            </Status></Panel>}
+            {can(role, 'manage') && <Panel title="ETL gần nhất · phiên bản đang xem"><Status query={latestETL}>
+              {lastJob ? <div className="summary-body"><Badge status={lastJob.status} /><div className="data-foot">Job: <ShortId id={lastJob._id} /> · {new Date(lastJob.created_at).toLocaleString('vi-VN')}</div><div>{lastJob.metrics?.counts ? `${lastJob.metrics.counts.raw} raw · ${lastJob.metrics.counts.clean} clean · ${lastJob.metrics.counts.invalid} invalid · ${lastJob.metrics.counts.duplicate} duplicate` : lastJob.error?.message || 'Đang chờ kết quả xử lý.'}</div><Link to="/etl">Xem giám sát ETL</Link></div> : <div className="empty">Chưa có ETL run cho phiên bản này.</div>}
+            </Status></Panel>}
           </div>
           <div className="chart-grid">
             <Panel
-              title="Số tin thay đổi thế nào theo tháng?"
-              subtitle="Số tin theo tháng đăng tuyển"
+              title={trends.data?.data?.length ? 'Số tin theo tháng đăng tuyển' : 'Số tin theo năm quan sát'}
             >
               <Status query={trends}>
                 <Chart
-                  labels={(trends.data?.data || []).map((r: Row) => r.month)}
-                  values={(trends.data?.data || []).map((r: Row) => r.count)}
+                  labels={(trends.data?.data?.length ? trends.data.data : years.data?.data || []).map((r: Row) => r.month || String(r.posted_year))}
+                  values={(trends.data?.data?.length ? trends.data.data : years.data?.data || []).map((r: Row) => r.count)}
                   type="line"
                 />
               </Status>
             </Panel>
             <Panel
               title="Ngành nào xuất hiện nhiều tin nhất?"
-              subtitle="Số tin trong tập dữ liệu đã xử lý"
             >
               <Status query={industry}>
                 <Chart
@@ -261,7 +228,6 @@ function Dashboard() {
           </div>
           <Panel
             title="Kỹ năng được yêu cầu"
-            subtitle="Mỗi tin chỉ được đếm một lần cho một kỹ năng"
           >
             <Status query={skills}>
               <Chart
@@ -274,20 +240,16 @@ function Dashboard() {
               />
             </Status>
           </Panel>
-          <div className="data-foot">
-            Dataset <ShortId id={meta.dataset_version} /> · {meta.sample_size}{" "}
-            mẫu · {meta.method} · Cập nhật{" "}
-            {new Date(meta.updated_at).toLocaleString("vi-VN")}
+          <div className="chart-grid extra-insights">
+            <Panel title="Địa phương trong tập quan sát"><Status query={locations}><Chart labels={(locations.data?.data || []).slice(0, 10).map((r: Row) => r.province)} values={(locations.data?.data || []).slice(0, 10).map((r: Row) => r.jobs)} color="#46c9ad" /></Status></Panel>
+            <Panel title="Phân bố lương công bố" subtitle={`Khoảng 5 triệu VND/tháng · N = ${data.salary_sample_size ?? 0} nhãn hợp lệ`}><Status query={histogram}><Chart labels={(histogram.data?.data || []).map((r: Row) => `${r.lower_vnd / 1e6}–${r.lower_vnd / 1e6 + 5}`)} values={(histogram.data?.data || []).map((r: Row) => r.count)} color="#ae93ff" /></Status></Panel>
           </div>
-          <p className="muted">{data.total_industries ?? "—"} ngành · {data.total_provinces ?? "—"} địa phương có thông tin.</p>
           <div className="panel-links">
             <Link to="/analytics/recruitment">Phân tích tin tuyển dụng</Link>
             <Link to="/analytics/salary">Khảo sát mức lương</Link>
-            <Link to="/models">Đánh giá mô hình</Link>
-            <Link to="/predictions">Dự đoán mức lương</Link>
+            {can(role, 'predict') && <><Link to="/models">Đánh giá mô hình</Link><Link to="/predictions">Dự đoán mức lương</Link></>}
           </div>
-          <ObservationScope meta={meta} />
-        </>
+        </div>
       )}
     </Status>
   );
@@ -304,7 +266,6 @@ function Analysis({ salary = false }: { salary?: boolean }) {
   const overview = useData("/analytics/overview", true);
   return (
     <>
-      <Status query={overview}><ObservationScope meta={overview.data?.meta} /></Status>
       <div className="chart-grid">
         <Panel
           title={salary ? "Lương công bố phân bố ra sao?" : "Địa phương nào có nhiều tin?"}
@@ -355,7 +316,6 @@ function Analysis({ salary = false }: { salary?: boolean }) {
       {salary && (
         <Panel
           title="Các phân vị lương"
-          subtitle="Tính trên tin có nhãn lương chuẩn hóa; percentile approximate"
         >
           <Status query={overview}>
             <div className="percentiles">
@@ -369,7 +329,7 @@ function Analysis({ salary = false }: { salary?: boolean }) {
           </Status>
         </Panel>
       )}
-      <Panel title={salary ? "So sánh lương công bố theo ngành" : "Kinh nghiệm liên hệ với lương công bố thế nào?"} subtitle="VND/tháng · trung vị mô tả mẫu quan sát; phân vị nhóm chỉ hiện từ 30 nhãn lương. Không xếp hạng từ nhóm ít mẫu.">
+      <Panel title={salary ? "So sánh lương công bố theo ngành" : "Kinh nghiệm liên hệ với lương công bố thế nào?"}>
         <Status query={b}>
           <Table
             rows={b.data?.data || []}
@@ -396,12 +356,19 @@ function Analysis({ salary = false }: { salary?: boolean }) {
   );
 }
 function JobList() {
-  const [page, setPage] = useState(1),
-    [q, setQ] = useState(""),
+  const [q, setQ] = useState(""),
     [search, setSearch] = useState(""),
     [detail, setDetail] = useState<Row | null>(null);
+  const [jobFilters, setJobFilters] = useState<Record<string, string>>({});
+  const scope = useContext(Context);
+  const signature = JSON.stringify([scope.version, scope.province, scope.industry, scope.postedFrom, scope.postedTo, search, jobFilters]);
+  const [paging, setPaging] = useState({ signature: '', page: 1, cursors: [''] });
+  const page = paging.signature === signature ? paging.page : 1;
+  const cursors = paging.signature === signature ? paging.cursors : [''];
+  function setPage(value: number) { setPaging({ signature, page: value, cursors }); }
+  const extra = new URLSearchParams(Object.fromEntries(Object.entries(jobFilters).filter(([, v]) => v)));
   const query = useData(
-    "/jobs?page=" + page + "&q=" + encodeURIComponent(search),
+    "/jobs?cursor=" + encodeURIComponent(cursors[page - 1] || '') + "&q=" + encodeURIComponent(search) + '&' + extra,
     true,
   );
   return (
@@ -416,12 +383,18 @@ function JobList() {
       >
         <input
           aria-label="Tìm vị trí tuyển dụng"
-          placeholder="Tìm theo tên vị trí…"
+          placeholder="Tìm theo vị trí hoặc doanh nghiệp…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
         <Button>Tìm kiếm</Button>
       </form>
+      <div className="admin-toolbar job-filters">
+        {([['salary_min', 'Lương từ (VND/tháng)'], ['salary_max', 'Lương đến (VND/tháng)'], ['experience_min', 'Kinh nghiệm từ (năm)'], ['experience_max', 'Kinh nghiệm đến (năm)'], ['posted_year', 'Năm đăng']] as const).map(([key, label]) => <label key={key}>{label}<input type="number" min={key === 'posted_year' ? 1900 : 0} max={key.startsWith('experience') ? 60 : key === 'posted_year' ? 2099 : 1e12} value={jobFilters[key] || ''} onChange={e => { setJobFilters({ ...jobFilters, [key]: e.target.value }); setPage(1); }} /></label>)}
+        <label>Loại hình<input value={jobFilters.employment_type || ''} onChange={e => { setJobFilters({ ...jobFilters, employment_type: e.target.value }); setPage(1); }} placeholder="Đúng giá trị trong nguồn" /></label>
+        <label>Sắp xếp<select value={jobFilters.sort || 'posted_at'} onChange={e => { setJobFilters({ ...jobFilters, sort: e.target.value }); setPage(1); }}><option value="posted_at">Ngày đăng</option><option value="salary_mid_vnd">Lương</option><option value="experience_years">Kinh nghiệm</option><option value="job_title">Chức danh</option></select></label>
+        <label>Thứ tự<select value={jobFilters.order || 'desc'} onChange={e => { setJobFilters({ ...jobFilters, order: e.target.value }); setPage(1); }}><option value="desc">Giảm dần</option><option value="asc">Tăng dần</option></select></label>
+      </div>
       <Panel
         title="Danh sách việc làm"
         subtitle={`${query.data?.meta.total || 0} tin phù hợp · phân trang tại backend`}
@@ -433,7 +406,10 @@ function JobList() {
               {
                 name: "Vị trí",
                 render: (r) => (
-                  <button className="text-button" onClick={() => setDetail(r)}>
+                    <button className="text-button" onClick={async () => {
+                      try { const result = await api('/jobs/' + encodeURIComponent(r._id) + '?dataset_version=' + encodeURIComponent(query.data?.meta.dataset_version)); setDetail(result.data); }
+                      catch (error) { window.dispatchEvent(new CustomEvent('app-notice', { detail: (error as Error).message })); }
+                    }}>
                     {r.job_title}
                   </button>
                 ),
@@ -449,27 +425,21 @@ function JobList() {
           />
         </Status>
         <div className="pagination">
+          <button disabled={page === 1} onClick={() => setPaging({ signature, page: 1, cursors: [''] })}>Trang đầu</button>
           <button disabled={page === 1} onClick={() => setPage(page - 1)}>
             Trước
           </button>
           <span>Trang {page}</span>
           <button
-            disabled={page * 25 >= (query.data?.meta.total || 0)}
-            onClick={() => setPage(page + 1)}
+            disabled={!query.data?.meta.next_cursor}
+            onClick={() => setPaging({ signature, page: page + 1, cursors: [...cursors.slice(0, page), query.data.meta.next_cursor] })}
           >
             Sau
           </button>
         </div>
       </Panel>
       {detail && (
-        <div className="modal-backdrop" onClick={() => setDetail(null)}>
-          <section
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Chi tiết tuyển dụng"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <DetailDialog onClose={() => setDetail(null)}>
             <button
               className="close"
               aria-label="Đóng chi tiết"
@@ -486,14 +456,14 @@ function JobList() {
               {detail.salary_original_text} · {detail.salary_quality_status}
             </p>
             <p>{detail.required_skills.join(" · ")}</p>
+            <div className="job-description">{detail.job_description || 'Nguồn không cung cấp mô tả.'}</div>
             {/^https?:\/\//.test(detail.source_url) && (
               <a href={detail.source_url} target="_blank" rel="noreferrer">
                 Mở tin gốc ↗
               </a>
             )}
             <div className="data-foot">Raw ref: {detail.raw_record_ref}</div>
-          </section>
-        </div>
+        </DetailDialog>
       )}
     </>
   );
@@ -507,25 +477,66 @@ function Datasets() {
     [notice, setNotice] = useState(""),
     [quality, setQuality] = useState<Row | null>(null);
   const [sourceMetadata, setSourceMetadata] = useState<Record<string, string>>({});
+  const [files, setFiles] = useState<File[]>([]), [preview, setPreview] = useState(''), [confirmed, setConfirmed] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
+  const uploadKeys = React.useRef(new Map<string, string>());
   const upload = useMutation({
     mutationFn: async () => {
       if (!file) throw Error("Hãy chọn file dữ liệu.");
+      if (!confirmed) throw Error('Hãy kiểm tra preview và xác nhận nguồn trước khi gửi.');
+      if (files.some(f => f.size > 50 * 1024 * 1024)) throw Error('Mỗi file tối đa 50 MiB; chia JSONL thành các chunk nhỏ hơn.');
+      const metadata = {
+        source_type: demo ? 'synthetic' : 'upload', dataset_origin: demo ? 'synthetic' : 'public_unverified',
+        permission_status: demo ? 'SYNTHETIC_FIXTURE' : 'DECLARED_PERMISSION',
+        ...Object.fromEntries(Object.entries(sourceMetadata).filter(([, value]) => value.trim())),
+      };
+      const signature = JSON.stringify({ files: files.map(f => [f.name, f.size, f.lastModified]), source, demo, metadata });
+      if (!uploadKeys.current.has(signature)) uploadKeys.current.set(signature, crypto.randomUUID());
+      const idempotencyKey = uploadKeys.current.get(signature)!;
+      if (!demo && !sourceMetadata.permission_evidence?.trim()) throw Error('Cần ghi bằng chứng quyền sử dụng nguồn ngoài.');
+      if (files.length > 1) {
+        if (files.some(f => !f.name.toLowerCase().endsWith('.jsonl'))) throw Error('Staged import chỉ nhận các chunk JSONL.');
+        const chunks = [];
+        for (const f of files) {
+          setUploadProgress('Đang kiểm tra ' + f.name);
+          const bytes = await f.arrayBuffer();
+          const digest = await crypto.subtle.digest('SHA-256', bytes);
+          const sha256 = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+          const text = new TextDecoder().decode(bytes);
+          let row_count = 0, start = 0;
+          while (start < text.length) {
+            const newline = text.indexOf('\n', start), end = newline < 0 ? text.length : newline;
+            if (text.slice(start, end).trim()) row_count++;
+            if (row_count > 500000) throw Error('Mỗi chunk tối đa 500.000 dòng; chia file thành các chunk nhỏ hơn.');
+            start = end + 1;
+          }
+          chunks.push({ sha256, bytes: f.size, row_count });
+        }
+        const staged = await api('/datasets/staged', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ source, is_demo: demo, source_metadata: metadata, chunks }) });
+        const version = staged.data.dataset_version;
+        const state = await api('/datasets/' + version);
+        if (state.data.sealed) return api(`/datasets/staged/${version}/complete`, { method: 'POST' });
+        for (let i = 0; i < files.length; i++) {
+          setUploadProgress(`Đang gửi chunk ${i + 1}/${files.length}`);
+          const payload = new FormData(); payload.append('file', files[i]);
+          await api(`/datasets/staged/${version}/chunks/${i}`, { method: 'PUT', body: payload });
+        }
+        return api(`/datasets/staged/${version}/complete`, { method: 'POST' });
+      }
       const data = new FormData();
       data.append("file", file);
       data.append("source", source);
       data.append("is_demo", String(demo));
-      data.append("source_metadata", JSON.stringify({
-        source_type: demo ? "synthetic" : "upload",
-        ...Object.fromEntries(Object.entries(sourceMetadata).filter(([, value]) => value.trim())),
-      }));
+      data.append("source_metadata", JSON.stringify(metadata));
       return api("/datasets/upload", {
         method: "POST",
         body: data,
-        headers: { "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Idempotency-Key": idempotencyKey },
       });
     },
     onSuccess: (r) => {
       setNotice("Đã nhận file. Ingestion job: " + r.data.job_id);
+      setUploadProgress('Đã gửi; theo dõi tiến độ ở Giám sát ETL.');
       client.invalidateQueries();
     },
     onError: (e) => setNotice(e.message),
@@ -560,12 +571,19 @@ function Datasets() {
               ["collected_at", "Ngày thu thập (nếu biết)", "date"],
               ["observation_from", "Bắt đầu quan sát (nếu biết)", "date"],
               ["observation_to", "Kết thúc quan sát (nếu biết)", "date"],
+              ["permission_evidence", "Bằng chứng quyền sử dụng nguồn ngoài", "text"],
+              ["source_revision", "Revision nguồn (nếu có)", "text"],
+              ["adapter_version", "Phiên bản adapter (nếu có)", "text"],
             ].map(([key, label, type]) => <label key={key}>{label}<input type={type} aria-label={label} value={sourceMetadata[key] || ""} onChange={(e) => setSourceMetadata({ ...sourceMetadata, [key]: e.target.value })} /></label>)}
             <input
               type="file"
               aria-label="Chọn dataset"
               accept=".csv,.json,.jsonl"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              multiple
+              onChange={async (e) => {
+                const selected = Array.from(e.target.files || []); setFiles(selected); setFile(selected[0] || null); setConfirmed(false);
+                setPreview(selected[0] ? await selected[0].slice(0, 4096).text() : '');
+              }}
             />
             <input
               aria-label="Nguồn dữ liệu"
@@ -583,13 +601,16 @@ function Datasets() {
               Dữ liệu DEMO
             </label>
             <Button
-              disabled={!file || upload.isPending || !source.trim()}
+              disabled={!file || !confirmed || upload.isPending || !source.trim()}
               onClick={() => upload.mutate()}
             >
               <Upload size={16} />{" "}
               {upload.isPending ? "Đang tải…" : "Upload dataset"}
             </Button>
           </div>
+          {file && <div className="import-preview"><h3>1 · Kiểm tra dữ liệu</h3><div>{files.length} file · {files.reduce((n, f) => n + f.size, 0).toLocaleString('vi-VN')} bytes</div><pre className="json-report">{preview}</pre><div className="muted">Tên cột chuẩn: job_title, company_name, salary, source_job_id, province, industry, posted_year. Nguồn Tinix/VietJobs cần chuyển qua adapter trước khi nhập.</div>
+            <h3>2 · Xác nhận nguồn</h3><label className="checkbox"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />Tôi đã kiểm tra schema, quyền sử dụng và nhãn DEMO/nguồn ngoài.</label>
+            <div role="status">{uploadProgress}</div><div className="data-foot">3 · Gửi → ingestion → chạy ETL → kiểm tra quality → công bố nếu đạt. Không tạo ngày đăng từ năm.</div></div>}
         </div>
       </section>
       {notice && (
@@ -599,7 +620,6 @@ function Datasets() {
       )}
       <Panel
         title="Dataset versions"
-        subtitle="Raw → Clean → Analytics; mỗi lần xử lý được truy vết bằng attempt"
       >
         <Status query={query}>
           <Table
@@ -635,6 +655,7 @@ function Datasets() {
                     )}
                     <button
                       onClick={async () => {
+                        try {
                         const result = await api(
                           "/datasets/" + r._id + "/quality",
                         );
@@ -644,6 +665,7 @@ function Datasets() {
                             message: "Chưa có báo cáo. Hãy chạy ETL.",
                           },
                         );
+                        } catch (error) { setNotice((error as Error).message); }
                       }}
                     >
                       Chất lượng
@@ -690,7 +712,6 @@ function ETL() {
       )}
       <Panel
         title="Giám sát tác vụ"
-        subtitle="Các tác vụ chạy ở worker; giao diện cập nhật mỗi 4 giây"
       >
         <Status query={query}>
           <Table
@@ -822,7 +843,6 @@ function Models() {
       )}
       <Panel
         title="Model registry"
-        subtitle="Chọn theo validation; holdout test dùng cho đánh giá cuối. Spark numeric là thí nghiệm scale riêng."
       >
         <Status query={query}>
           <Table
@@ -890,10 +910,12 @@ function Models() {
                   <div className="actions">
                     <button
                       onClick={async () => {
+                        try {
                         const result = await api(
                           "/models/" + r._id + "/metrics",
                         );
                         setDetail(result.data);
+                        } catch (error) { setNotice((error as Error).message); }
                       }}
                     >
                       Metrics
@@ -982,11 +1004,9 @@ function Predictions() {
   }
   return (
     <>
-      <p className="muted">Các đầu vào mô tả công việc, kinh nghiệm và kỹ năng. Kết quả ước lượng lương công bố từ dữ liệu huấn luyện, không bảo đảm lương ứng viên nhận được; MAE là sai số trên holdout, không phải khoảng dự đoán cho từng người.</p>
       <div className="prediction-grid">
         <Panel
           title="Thông tin công việc"
-          subtitle="Kết quả từ model đang active, được lưu vào lịch sử cá nhân"
         >
           <form
             className="prediction-form"
@@ -1073,9 +1093,6 @@ function Predictions() {
                       } as Record<string, string>)[w] || w}
                 </div>
               ))}
-              <small className="muted">
-                Chưa có khoảng dự đoán đã hiệu chuẩn.
-              </small>
             </div>
           ) : (
             <div className="empty">
@@ -1115,7 +1132,6 @@ function Settings() {
     <>
       <Panel
         title="Trạng thái hệ thống"
-        subtitle="Heartbeat workers và kết nối lưu trữ"
       >
         <Status query={query}>
           <div className="system-summary">
@@ -1149,11 +1165,12 @@ function Settings() {
   );
 }
 export default function Workspace({ role }: { role: string }) {
-  const [version, setVersion] = useState(""),
-    [province, setProvince] = useState(""),
-    [industry, setIndustry] = useState(""),
-    [postedFrom, setPostedFrom] = useState(""),
-    [postedTo, setPostedTo] = useState("");
+  const [params, setParams] = useSearchParams();
+  const version = params.get('dataset_version') || '', province = params.get('province') || '', industry = params.get('industry') || '',
+    postedFrom = params.get('posted_from') || '', postedTo = params.get('posted_to') || '';
+  function updateFilters(changes: Record<string, string>) {
+    setParams(previous => { const next = new URLSearchParams(previous); Object.entries(changes).forEach(([key, value]) => value ? next.set(key, value) : next.delete(key)); return next; });
+  }
   const datasets = useQuery({
     queryKey: ["versions"],
     queryFn: () => api("/datasets"),
@@ -1180,6 +1197,11 @@ export default function Workspace({ role }: { role: string }) {
     "/models": "Machine Learning",
     "/predictions": "Dự đoán mức lương",
     "/settings": "Hệ thống",
+    "/sources": "Nguồn dữ liệu & quyền sử dụng",
+    "/quality": "Chất lượng theo phiên bản",
+    "/users": "Quản trị người dùng",
+    "/audit": "Nhật ký quản trị",
+    '/profile': 'Hồ sơ cá nhân',
   };
   const showFilters = [
     "/",
@@ -1187,32 +1209,24 @@ export default function Workspace({ role }: { role: string }) {
     "/analytics/salary",
     "/jobs",
   ].includes(location.pathname);
+  if (!can(role, routePermission[location.pathname.toLowerCase().replace(/\/+$/, '')] || 'read')) return <Forbidden />;
   return (
     <Context.Provider
       value={{ version, province, industry, role, postedFrom, postedTo }}
     >
-      <div className="page-heading">
-        <div>
-          <div className="eyebrow">WORKSPACE / RECRUITMENT ANALYTICS</div>
-          <h1>{names[location.pathname] || "Trang không tồn tại"}</h1>
-          <p className="muted">
-            Phân tích có nguồn gốc. Kết quả có thể kiểm chứng.
-          </p>
-        </div>
+      <PageHeader title={names[location.pathname] || "Trang không tồn tại"}>
         <span className="badge">
           <span className="dot" /> Dữ liệu từ API
         </span>
-      </div>
+      </PageHeader>
       {showFilters && (
-        <div className="filter-bar">
+        <FilterToolbar>
           <Filter size={17} />
           <select
             aria-label="Dataset version"
             value={version}
             onChange={(e) => {
-              setVersion(e.target.value);
-              setProvince("");
-              setIndustry("");
+              updateFilters({ dataset_version: e.target.value, province: '', industry: '', posted_from: '', posted_to: '' });
             }}
           >
             <option value="">Dataset đang active</option>
@@ -1227,7 +1241,7 @@ export default function Workspace({ role }: { role: string }) {
           <select
             aria-label="Địa phương"
             value={province}
-            onChange={(e) => setProvince(e.target.value)}
+            onChange={(e) => updateFilters({ province: e.target.value })}
           >
             <option value="">Tất cả địa phương</option>
             {(options.data?.data.provinces || []).map((p: string) => (
@@ -1237,7 +1251,7 @@ export default function Workspace({ role }: { role: string }) {
           <select
             aria-label="Ngành nghề"
             value={industry}
-            onChange={(e) => setIndustry(e.target.value)}
+            onChange={(e) => updateFilters({ industry: e.target.value })}
           >
             <option value="">Tất cả ngành nghề</option>
             {(options.data?.data.industries || []).map((p: string) => (
@@ -1250,7 +1264,7 @@ export default function Workspace({ role }: { role: string }) {
               aria-label="Từ ngày"
               type="date"
               value={postedFrom}
-              onChange={(e) => setPostedFrom(e.target.value)}
+              onChange={(e) => updateFilters({ posted_from: e.target.value })}
             />
           </label>
           <label>
@@ -1259,21 +1273,26 @@ export default function Workspace({ role }: { role: string }) {
               aria-label="Đến ngày"
               type="date"
               value={postedTo}
-              onChange={(e) => setPostedTo(e.target.value)}
+              onChange={(e) => updateFilters({ posted_to: e.target.value })}
             />
           </label>
-        </div>
+        </FilterToolbar>
       )}
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/analytics/recruitment" element={<Analysis />} />
         <Route path="/analytics/salary" element={<Analysis salary />} />
         <Route path="/jobs" element={<JobList />} />
-        <Route path="/datasets" element={<Datasets />} />
-        <Route path="/etl" element={<ETL />} />
-        <Route path="/models" element={<Models />} />
-        <Route path="/predictions" element={<Predictions />} />
-        <Route path="/settings" element={<Settings />} />
+        <Route path="/datasets" element={<PermissionGate role={role} permission="manage"><Datasets /></PermissionGate>} />
+        <Route path="/etl" element={<PermissionGate role={role} permission="manage"><ETL /></PermissionGate>} />
+        <Route path="/models" element={<PermissionGate role={role} permission="predict"><Models /></PermissionGate>} />
+        <Route path="/predictions" element={<PermissionGate role={role} permission="predict"><Predictions /></PermissionGate>} />
+        <Route path="/settings" element={<PermissionGate role={role} permission="manage"><Settings /></PermissionGate>} />
+        <Route path="/users" element={<PermissionGate role={role} permission="manage"><AdminUsers /></PermissionGate>} />
+        <Route path="/audit" element={<PermissionGate role={role} permission="manage"><AuditLogs /></PermissionGate>} />
+        <Route path="/sources" element={<PermissionGate role={role} permission="manage"><Sources /></PermissionGate>} />
+        <Route path="/quality" element={<PermissionGate role={role} permission="manage"><QualityDashboard /></PermissionGate>} />
+        <Route path="/profile" element={<Profile />} />
         <Route path="*" element={<Link to="/">Quay lại Dashboard</Link>} />
       </Routes>
     </Context.Provider>

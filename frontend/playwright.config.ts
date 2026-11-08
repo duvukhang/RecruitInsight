@@ -1,6 +1,7 @@
 import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./e2e",
+  testMatch: ['app.spec.ts', 'upgrade.live.spec.ts'],
   use: {
     baseURL: "http://localhost:8080",
     channel: "chrome",

@@ -7,6 +7,13 @@ import {
   LegendComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import { useTheme } from './theme';
+
+function chartPalette(theme: string) {
+  return theme === 'light'
+    ? { text: '#425d7c', axis: '#526a85', line: '#b9ccdf', grid: '#e0e8f2', background: '#fff' }
+    : { text: '#b3c6df', axis: '#8897ac', line: '#34445b', grid: '#26364d', background: '#142137' };
+}
 echarts.use([
   BarChart,
   LineChart,
@@ -28,26 +35,32 @@ export function Chart({
   color?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const theme = useTheme();
+  const datasetKey = JSON.stringify([labels, values, type, color]);
   useEffect(() => {
+    if (!ref.current) return;
     const chart = echarts.init(ref.current!);
+    const palette = chartPalette(theme);
     chart.setOption({
-      tooltip: { trigger: "axis" },
+      animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      textStyle: { color: palette.text },
+      tooltip: { trigger: "axis", backgroundColor: palette.background, borderColor: palette.line, textStyle: { color: palette.text } },
       grid: { left: 55, right: 20, top: 20, bottom: 65 },
       xAxis: {
         type: "category",
         data: labels,
         axisLabel: {
-          color: "#8897ac",
+          color: palette.axis,
           rotate: labels.length > 6 ? 25 : 0,
           fontSize: 10,
         },
-        axisLine: { lineStyle: { color: "#e5ebf4" } },
+        axisLine: { lineStyle: { color: palette.line } },
         axisTick: { show: false },
       },
       yAxis: {
         type: "value",
-        axisLabel: { color: "#8897ac", fontSize: 10 },
-        splitLine: { lineStyle: { color: "#eff3f8" } },
+        axisLabel: { color: palette.axis, fontSize: 10 },
+        splitLine: { lineStyle: { color: palette.grid } },
       },
       series: [
         {
@@ -69,8 +82,9 @@ export function Chart({
       observer.disconnect();
       chart.dispose();
     };
-  }, [labels, values, type, color]);
+  }, [datasetKey, theme]);
   return (
+    labels.length === 0 ? <div className="empty" role="status">Chưa có dữ liệu cho biểu đồ này.</div> :
     <div
       ref={ref}
       className="chart"
@@ -81,18 +95,27 @@ export function Chart({
 }
 export function Scatter({ points }: { points: number[][] }) {
   const ref = useRef<HTMLDivElement>(null);
+  const theme = useTheme();
   useEffect(() => {
+    if (!ref.current) return;
     const chart = echarts.init(ref.current!);
+    const palette = chartPalette(theme);
     chart.setOption({
-      tooltip: { trigger: "item" },
+      animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      textStyle: { color: palette.text },
+      tooltip: { trigger: "item", backgroundColor: palette.background, borderColor: palette.line, textStyle: { color: palette.text } },
       grid: { left: 60, right: 25, top: 25, bottom: 50 },
       xAxis: {
         type: "value",
         name: "Actual (triệu)",
         nameLocation: "middle",
         nameGap: 30,
+        nameTextStyle: { color: palette.axis },
+        axisLabel: { color: palette.axis },
+        axisLine: { lineStyle: { color: palette.line } },
+        splitLine: { lineStyle: { color: palette.grid } },
       },
-      yAxis: { type: "value", name: "Predicted (triệu)" },
+      yAxis: { type: "value", name: "Predicted (triệu)", nameTextStyle: { color: palette.axis }, axisLabel: { color: palette.axis }, axisLine: { lineStyle: { color: palette.line } }, splitLine: { lineStyle: { color: palette.grid } } },
       series: [
         {
           type: "scatter",
@@ -108,7 +131,7 @@ export function Scatter({ points }: { points: number[][] }) {
       observer.disconnect();
       chart.dispose();
     };
-  }, [points]);
+  }, [points, theme]);
   return (
     <div
       className="chart"

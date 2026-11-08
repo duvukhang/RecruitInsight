@@ -14,10 +14,11 @@ STRING_FIELDS = ['raw_record_ref','source_job_key','error_code','job_title','job
  'company_name','company_key','source','province','industry','seniority_level','education_level',
  'remote_type','employment_type','job_description','posted_at','source_url','salary_original_text',
  'salary_quality_status','salary_currency','salary_period','salary_basis','salary_parse_method',
- 'fx_rate_reference','fx_rate_date','global_duplicate_ref']
+ 'fx_rate_reference','fx_rate_date','global_duplicate_ref','source_job_id','original_record_id',
+ 'dataset_origin','provenance_json','experience_metadata_json']
 SCHEMA = StructType([StructField(k,StringType()) for k in STRING_FIELDS] + [
  StructField(k,DoubleType()) for k in ['experience_years','salary_min','salary_max','salary_min_vnd','salary_max_vnd','salary_mid_vnd']] + [
- StructField('record_number',LongType()),StructField('salary_is_disclosed',BooleanType()),
+ StructField('record_number',LongType()),StructField('posted_year',LongType()),StructField('salary_is_disclosed',BooleanType()),
  StructField('required_skills',ArrayType(StringType())),
  StructField('salary_normalization_assumptions',ArrayType(StringType()))])
 
@@ -39,6 +40,8 @@ def write_partition(rows, collection, version, attempt, mongo_config):
     db=connection[mongo_config['authSource']];batch=[]
     for row in rows:
         record=row.asDict(recursive=True)
+        record['source_metadata'] = json.loads(record.pop('provenance_json', None) or '{}')
+        record['experience_metadata'] = json.loads(record.pop('experience_metadata_json', None) or '{}')
         record.update({'_id':attempt+':'+record['raw_record_ref'], 'dataset_version':version,
                        'attempt_id':attempt,'created_at':now(),'pipeline_version':'etl-v1'})
         if collection=='invalid_jobs':
@@ -80,7 +83,8 @@ def aggregate(clean):
     skills=[r.asDict() for r in clean.select(F.explode('required_skills').alias('skill')).groupBy('skill').count().orderBy(F.desc('count')).limit(30).collect()]
     trends=[r.asDict() for r in clean.filter(F.col('posted_at').isNotNull()).withColumn('month',F.substring('posted_at',1,7)).groupBy('month').count().orderBy('month').limit(120).collect()]
     hist=[r.asDict() for r in clean.filter(F.col('salary_mid_vnd').isNotNull()).withColumn('lower_vnd',F.floor(F.col('salary_mid_vnd')/5000000)*5000000).groupBy('lower_vnd').count().orderBy('lower_vnd').limit(100).collect()]
-    return {'overview':summary,'industries':groups('industry'),'locations':groups('province'),
+    years=[r.asDict() for r in clean.filter(F.col('posted_year').isNotNull()).groupBy('posted_year').count().orderBy('posted_year').collect()]
+    return {'overview':summary,'industries':groups('industry'),'locations':groups('province'),'years':years,
             'experience':groups('experience_years'),'companies':groups('company_name'),
             'skills':skills,'trends':trends,'histogram':hist}
 
@@ -112,7 +116,7 @@ def etl(db,job,guard):
         valid_rate=(counts['raw']-counts['invalid'])/counts['raw'] if counts['raw'] else 0
         usable=clean.filter(F.col('salary_mid_vnd')>0).count()
         threshold=normalization.get('validity_min',.9)
-        fields=['job_title','company_name','source','province','industry','experience_years','posted_at','salary_mid_vnd']
+        fields=['job_title','company_name','source','province','industry','experience_years','posted_at','posted_year','salary_mid_vnd']
         missing=all_rows.agg(*[F.sum(F.when(F.col(c).isNull() | F.trim(F.col(c).cast('string')).isin('', 'Unknown'),1).otherwise(0)).alias(c) for c in fields]).first().asDict()
         missing={k:int(v or 0) for k,v in missing.items()}
         salary_consistent=F.col('salary_mid_vnd').isNull() | ((F.col('salary_min_vnd')>0) & (F.col('salary_max_vnd')>=F.col('salary_min_vnd')) &
@@ -125,6 +129,16 @@ def etl(db,job,guard):
             **quality_metrics(counts,missing,consistent,usable,eligible,recent),
             'thresholds':{'validity_min':threshold},'passed':valid_rate>=threshold and counts['clean']>0,'generated_at':now(),'normalization_config':normalization}
         report['reasons']=[] if report['passed'] else ['VALIDITY_BELOW_THRESHOLD_OR_NO_CLEAN_RECORDS']
+        report['source_metadata'] = dataset.get('source_metadata', {})
+        profile = clean.agg(F.countDistinct('company_key').alias('companies'),
+            F.countDistinct(F.when(F.col('industry') != 'Unknown', F.col('industry'))).alias('industries'),
+            F.countDistinct(F.when(F.col('province') != 'Unknown', F.col('province'))).alias('provinces'), F.count('posted_year').alias('rows_with_year'),
+            F.min('posted_year').alias('year_from'), F.max('posted_year').alias('year_to')).first().asDict()
+        profile['salary_parse_status'] = {r['salary_quality_status']: r['count'] for r in clean.groupBy('salary_quality_status').count().collect()}
+        profile['source_coverage'] = {r['source']: r['count'] for r in clean.groupBy('source').count().collect()}
+        profile['dataset_origin'] = {r['dataset_origin']: r['count'] for r in clean.groupBy('dataset_origin').count().collect()}
+        profile['schema_version'] = 2  # distinct industry/province excludes Unknown
+        report['profile'] = profile
         db.data_quality_reports.replace_one({'_id':attempt},report,upsert=True)
         if not report['passed']:
             db.datasets.update_one({'_id':version,'active_attempt':attempt,'status':{'$ne':'PUBLISHED'}},{'$set':{'status':'FAILED'}})

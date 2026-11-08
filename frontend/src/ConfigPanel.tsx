@@ -43,10 +43,6 @@ export default function ConfigPanel() {
       <div className="panel-title">
         <div>
           <h2>Quy tắc chuẩn hóa & chất lượng</h2>
-          <p className="muted">
-            Tỷ giá và giả định thời gian do người dùng cung cấp, được lưu cùng
-            mỗi dataset version.
-          </p>
         </div>
       </div>
       {query.error ? (

@@ -1,6 +1,9 @@
 let token = "";
 let csrf = sessionStorage.getItem("csrf") || "";
 let refreshFlight: Promise<void> | null = null;
+export class ApiError extends Error {
+  constructor(message: string, public status: number) { super(message); }
+}
 function renew() {
   if (!refreshFlight) {
     refreshFlight = fetch("/api/v1/auth/refresh", {
@@ -38,7 +41,7 @@ async function authenticatedFetch(
       ...init.headers,
     },
   });
-  if (response.status === 401 && !path.startsWith("/auth/") && !retried) {
+  if (response.status === 401 && !['/auth/login', '/auth/refresh', '/auth/logout'].includes(path) && !retried) {
     if (sentToken === token) await renew();
     return authenticatedFetch(path, init, true);
   }
@@ -58,7 +61,7 @@ export async function api(path: string, init: RequestInit = {}) {
   }
   const body = response.status === 204 ? {} : await response.json();
   if (!response.ok)
-    throw Error(body.error?.message || "Không thể kết nối dịch vụ.");
+    throw new ApiError(body.error?.message || "Không thể kết nối dịch vụ.", response.status);
   return body;
 }
 export function remember(result: {
